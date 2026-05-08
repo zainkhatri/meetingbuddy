@@ -415,15 +415,30 @@ def slack_user_to_owner(slack_client, slack_user_id):
 
 @app.event('message')
 def handle_message(event, client, say, logger):
-    # Ignore bot messages and edits
-    if event.get('bot_id') or event.get('subtype'):
+    # Bot messages: skip
+    if event.get('bot_id'):
         return
-    text = (event.get('text') or '').strip()
-    if not text:
+    subtype = event.get('subtype')
+    # Edits: extract the new message and reprocess. Downstream HubSpot lookups
+    # are idempotent (find-or-create contact, find-or-tag existing meeting), so
+    # re-running on an edit either no-ops or fills in details that were missing
+    # on the original post.
+    if subtype == 'message_changed':
+        msg = event.get('message') or {}
+        if msg.get('bot_id'):
+            return
+        text = (msg.get('text') or '').strip()
+        user_id = msg.get('user')
+        ts = msg.get('ts')
+    elif subtype:
+        # Other subtypes (channel_join, message_deleted, etc.) — skip
         return
-    user_id = event.get('user')
-    channel = event.get('channel')
-    ts = event.get('ts')
+    else:
+        text = (event.get('text') or '').strip()
+        user_id = event.get('user')
+        ts = event.get('ts')
+    if not text or not ts:
+        return
 
     # Parse — Claude may return a single dict or a list of dicts (multi-booking post)
     parsed_raw = parse_with_claude(text)
@@ -510,6 +525,8 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         if r_patch.status_code != 200:
             say(text=f'⚠️ Failed to update meeting: {r_patch.status_code}', thread_ts=ts)
             return
+        # Enqueue for re-patching in case GCal re-syncs and clobbers booked_at
+        enqueue_retry(existing['id'], update_props)
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{existing['id']}"
         prev = existing['sourced_by']
@@ -549,10 +566,18 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
     # so reports show when the BDR booked it.
     if mtg and mtg.get('id'):
         booked_ms = int(float(ts) * 1000)
+        stamp_props = {'booked_at': str(booked_ms), 'hs_timestamp': str(booked_ms)}
         requests.patch(f"https://api.hubapi.com/crm/v3/objects/meetings/{mtg['id']}",
-                       headers=HS, json={'properties': {'booked_at': str(booked_ms),
-                                                         'hs_timestamp': str(booked_ms)}},
+                       headers=HS, json={'properties': stamp_props},
                        timeout=30)
+        # Bot-created meetings shouldn't get clobbered, but enqueue defensively —
+        # also lets the retry loop re-apply tags if anything resets them.
+        full_props = dict(stamp_props)
+        if owner_id: full_props['meeting_sourced_by'] = owner_id
+        if parsed.get('meeting_type'): full_props['meeting_type'] = parsed['meeting_type']
+        if parsed.get('source_channel'): full_props['meeting_source_channel'] = parsed['source_channel']
+        if parsed.get('conference_source'): full_props['conference_source'] = parsed['conference_source']
+        enqueue_retry(mtg['id'], full_props)
 
     # 5. Reply
     if mtg and mtg.get('id'):
@@ -571,6 +596,90 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         say(text=confirmation, thread_ts=ts)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
+
+
+# --- Retry queue: re-apply tags for 24h to catch GCal clobbers ---
+# When the bot tags or creates a meeting, we record the intended property
+# values. A worker re-checks every 5 min: if any property has been cleared
+# (e.g. GCal re-synced and wiped booked_at), patch it back. Drops entries
+# after 24h.
+_retry_queue = []  # list of {'meeting_id', 'props', 'first_seen', 'attempts'}
+_retry_lock = threading.Lock()
+RETRY_TTL_SEC = 24 * 3600
+
+def enqueue_retry(meeting_id, props):
+    if not meeting_id or not props:
+        return
+    with _retry_lock:
+        # Replace any existing entry for the same meeting with merged props
+        for entry in _retry_queue:
+            if entry['meeting_id'] == meeting_id:
+                entry['props'].update({k: v for k, v in props.items() if v})
+                return
+        _retry_queue.append({
+            'meeting_id': str(meeting_id),
+            'props': {k: v for k, v in props.items() if v},
+            'first_seen': time.time(),
+            'attempts': 0,
+        })
+
+def retry_pass():
+    now = time.time()
+    with _retry_lock:
+        # Drop expired
+        _retry_queue[:] = [e for e in _retry_queue if now - e['first_seen'] < RETRY_TTL_SEC]
+        snapshot = list(_retry_queue)
+    repaired = 0
+    for entry in snapshot:
+        mid = entry['meeting_id']
+        props = entry['props']
+        try:
+            r = requests.get(f'https://api.hubapi.com/crm/v3/objects/meetings/{mid}',
+                             headers=HS, params={'properties': ','.join(props.keys())},
+                             timeout=15)
+            if r.status_code != 200:
+                continue
+            current = (r.json().get('properties') or {})
+            # Detect drift: any intended prop missing or different
+            drift = {}
+            for k, want in props.items():
+                have = current.get(k)
+                if not have:
+                    drift[k] = want
+                    continue
+                # Normalize epoch-ms vs ISO comparison for date fields
+                if k in ('booked_at', 'hs_timestamp'):
+                    try:
+                        have_ms = int(datetime.fromisoformat(have.replace('Z', '+00:00')).timestamp() * 1000)
+                        want_ms = int(want)
+                        if abs(have_ms - want_ms) > 60000:  # >1min off
+                            drift[k] = want
+                    except Exception:
+                        if str(have) != str(want):
+                            drift[k] = want
+                elif str(have).lower() != str(want).lower():
+                    drift[k] = want
+            if drift:
+                rp = requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{mid}',
+                                    headers=HS, json={'properties': drift}, timeout=30)
+                if rp.status_code == 200:
+                    repaired += 1
+                    print(f'[retry] re-patched {mid}: {list(drift.keys())}')
+            entry['attempts'] += 1
+        except Exception as e:
+            print(f'[retry] error on {mid}: {e}')
+    return repaired
+
+
+def retry_loop():
+    while True:
+        try:
+            n = retry_pass()
+            if n:
+                print(f'[retry] repaired {n} meeting(s)')
+        except Exception as e:
+            print(f'[retry] loop error: {e}')
+        time.sleep(300)
 
 
 # --- Reconciler: merge bot-created/GCal twin pairs ---
@@ -682,4 +791,6 @@ if __name__ == '__main__':
     print('Meeting Bot starting (Socket Mode)...')
     threading.Thread(target=reconcile_loop, daemon=True).start()
     print('[reconcile] background sweep started (every 5 min)')
+    threading.Thread(target=retry_loop, daemon=True).start()
+    print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
     SocketModeHandler(app, SLACK_APP_TOKEN).start()
