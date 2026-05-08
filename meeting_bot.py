@@ -711,10 +711,11 @@ def replay_missed_messages():
         try:
             r = sc.conversations_history(channel=cid, oldest=cutoff, limit=200)
             msgs = r.get('messages', []) or []
+            print(f'[replay] {ch.get("name")}: ok={r.get("ok")} error={r.get("error")} '
+                  f'msgs={len(msgs)} has_more={r.get("has_more")} cutoff={cutoff}')
         except Exception as e:
             print(f'[replay] history error on {cid}: {e}')
             continue
-        print(f'[replay] {ch.get("name")}: {len(msgs)} message(s) in last 24h')
         kept = 0
         for m in reversed(msgs):  # oldest first
             if m.get('bot_id') or m.get('subtype'):
