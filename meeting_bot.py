@@ -24,9 +24,10 @@ Runs Slack Socket Mode — no public URL needed.
 import json
 import os
 import re
+import threading
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import anthropic
 from slack_bolt import App
@@ -572,6 +573,113 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 
 
+# --- Reconciler: merge bot-created/GCal twin pairs ---
+# Race: bot fires on Slack post → no GCal meeting yet → bot creates one. Later
+# GCal syncs the real calendar event, leaving a duplicate untagged copy.
+# This sweep finds those pairs (same owner + same day, one has booked_at, other
+# doesn't, one's title starts with "FurtherAI + ") and merges metadata onto
+# the GCal copy, then deletes the bot-created duplicate.
+def reconcile_duplicates():
+    since_ms = int((datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000)
+    body = {
+        'filterGroups': [{'filters': [
+            {'propertyName': 'hs_createdate', 'operator': 'GTE', 'value': str(since_ms)},
+        ]}],
+        'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'meeting_sourced_by',
+                       'booked_at', 'hubspot_owner_id', 'meeting_type',
+                       'meeting_source_channel', 'conference_source', 'hs_timestamp'],
+        'limit': 100,
+    }
+    r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
+                      headers=HS, json=body, timeout=30)
+    if r.status_code != 200:
+        return 0
+    by_key = {}
+    for m in r.json().get('results', []):
+        p = m.get('properties') or {}
+        oid = p.get('hubspot_owner_id')
+        st = p.get('hs_meeting_start_time')
+        if not oid or not st:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
+        except Exception:
+            continue
+        by_key.setdefault((oid, start_dt.date().isoformat()), []).append((m, start_dt, p))
+
+    merged = 0
+    for items in by_key.values():
+        if len(items) < 2:
+            continue
+        # Find bot-created (has booked_at + title prefix) and GCal twin (no booked_at, ±2h)
+        for bot_m, bot_dt, bot_p in items:
+            if not bot_p.get('booked_at'):
+                continue
+            if not (bot_p.get('hs_meeting_title') or '').startswith('FurtherAI + '):
+                continue
+            for gcal_m, gcal_dt, gcal_p in items:
+                if gcal_m['id'] == bot_m['id']:
+                    continue
+                if gcal_p.get('booked_at'):
+                    continue
+                if abs((bot_dt - gcal_dt).total_seconds()) > 7200:
+                    continue
+                # Merge bot metadata onto GCal copy
+                merge_props = {}
+                for k in ('booked_at', 'meeting_sourced_by', 'meeting_source_channel',
+                          'conference_source', 'meeting_type', 'hs_timestamp'):
+                    v = bot_p.get(k)
+                    if v and not gcal_p.get(k):
+                        merge_props[k] = v
+                if merge_props:
+                    requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{gcal_m["id"]}',
+                                   headers=HS, json={'properties': merge_props}, timeout=30)
+                # Delete bot-created duplicate
+                requests.delete(f'https://api.hubapi.com/crm/v3/objects/meetings/{bot_m["id"]}',
+                                headers=HS, timeout=30)
+                print(f'[reconcile] merged {bot_m["id"]} → {gcal_m["id"]}, deleted dup')
+                merged += 1
+                break
+    return merged
+
+
+# Sweep: find recently-created GCal meetings with no sourced_by, look up their
+# associated contact's other (bot-created) meetings to copy metadata. Catches
+# the case where the bot tagged a meeting but the patch didn't stick OR where
+# the bot never saw the GCal meeting at all because it synced after the post.
+def sweep_untagged_gcal():
+    since_ms = int((datetime.now(timezone.utc) - timedelta(hours=12)).timestamp() * 1000)
+    body = {
+        'filterGroups': [{'filters': [
+            {'propertyName': 'hs_createdate', 'operator': 'GTE', 'value': str(since_ms)},
+            {'propertyName': 'meeting_sourced_by', 'operator': 'NOT_HAS_PROPERTY'},
+        ]}],
+        'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'hubspot_owner_id'],
+        'limit': 50,
+    }
+    r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
+                      headers=HS, json=body, timeout=30)
+    if r.status_code != 200:
+        return 0
+    # Untagged GCal meetings — leave them alone unless reconcile_duplicates picks them up.
+    # (We only auto-tag when there's a bot-created twin to copy from; otherwise we'd be
+    # guessing the BDR who sourced it.)
+    return len(r.json().get('results', []))
+
+
+def reconcile_loop():
+    while True:
+        try:
+            n = reconcile_duplicates()
+            if n:
+                print(f'[reconcile] merged {n} duplicate pair(s)')
+        except Exception as e:
+            print(f'[reconcile] error: {e}')
+        time.sleep(300)
+
+
 if __name__ == '__main__':
     print('Meeting Bot starting (Socket Mode)...')
+    threading.Thread(target=reconcile_loop, daemon=True).start()
+    print('[reconcile] background sweep started (every 5 min)')
     SocketModeHandler(app, SLACK_APP_TOKEN).start()
