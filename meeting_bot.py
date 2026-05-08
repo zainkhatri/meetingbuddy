@@ -691,9 +691,11 @@ def _looks_like_booking(text):
     return any(kw in t for kw in ('meeting', 'demo', 'booked', 'call with', 'intro'))
 
 def replay_missed_messages():
+    from slack_sdk import WebClient
+    sc = WebClient(token=SLACK_BOT_TOKEN)
     try:
         time.sleep(5)  # let the socket connect first
-        ch_resp = app.client.users_conversations(types='public_channel,private_channel', limit=100)
+        ch_resp = sc.users_conversations(types='public_channel,private_channel', limit=100)
         channels = ch_resp.get('channels', []) or []
     except Exception as e:
         print(f'[replay] could not list channels: {e}')
@@ -707,7 +709,7 @@ def replay_missed_messages():
         if not cid:
             continue
         try:
-            r = app.client.conversations_history(channel=cid, oldest=cutoff, limit=200)
+            r = sc.conversations_history(channel=cid, oldest=cutoff, limit=200)
             msgs = r.get('messages', []) or []
         except Exception as e:
             print(f'[replay] history error on {cid}: {e}')
@@ -735,10 +737,10 @@ def replay_missed_messages():
             bookings = [b for b in bookings if b and b.get('is_booking')]
             if not bookings:
                 continue
-            owner_id = slack_user_to_owner(app.client, user_id)
+            owner_id = slack_user_to_owner(sc, user_id)
             for parsed in bookings:
                 try:
-                    _process_booking(parsed, text, owner_id, ts, app.client, silent_say)
+                    _process_booking(parsed, text, owner_id, ts, sc, silent_say)
                     processed += 1
                 except Exception as e:
                     print(f'[replay] process error ts={ts}: {e}')
