@@ -682,6 +682,65 @@ def retry_loop():
         time.sleep(300)
 
 
+# --- Startup replay: re-process the last 24h of Slack history ---
+# Catches messages posted while the bot was down (Railway restart, deploy,
+# socket disconnect). HubSpot lookups are idempotent — already-tagged
+# meetings stay correctly tagged, untagged ones get tagged.
+def _looks_like_booking(text):
+    t = (text or '').lower()
+    return any(kw in t for kw in ('meeting', 'demo', 'booked', 'call with', 'intro'))
+
+def replay_missed_messages():
+    try:
+        time.sleep(5)  # let the socket connect first
+        ch_resp = app.client.users_conversations(types='public_channel,private_channel', limit=100)
+        channels = ch_resp.get('channels', []) or []
+    except Exception as e:
+        print(f'[replay] could not list channels: {e}')
+        return
+    cutoff = str(time.time() - 24 * 3600)
+    silent_say = lambda **kw: None
+    processed = 0
+    for ch in channels:
+        cid = ch.get('id')
+        if not cid:
+            continue
+        try:
+            r = app.client.conversations_history(channel=cid, oldest=cutoff, limit=200)
+            msgs = r.get('messages', []) or []
+        except Exception as e:
+            print(f'[replay] history error on {cid}: {e}')
+            continue
+        for m in reversed(msgs):  # oldest first
+            if m.get('bot_id') or m.get('subtype'):
+                continue
+            text = (m.get('text') or '').strip()
+            if not text or not _looks_like_booking(text):
+                continue
+            ts = m.get('ts')
+            user_id = m.get('user')
+            if not ts or not user_id:
+                continue
+            try:
+                parsed_raw = parse_with_claude(text)
+            except Exception:
+                continue
+            if not parsed_raw:
+                continue
+            bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
+            bookings = [b for b in bookings if b and b.get('is_booking')]
+            if not bookings:
+                continue
+            owner_id = slack_user_to_owner(app.client, user_id)
+            for parsed in bookings:
+                try:
+                    _process_booking(parsed, text, owner_id, ts, app.client, silent_say)
+                    processed += 1
+                except Exception as e:
+                    print(f'[replay] process error ts={ts}: {e}')
+    print(f'[replay] re-processed {processed} booking(s) from last 24h')
+
+
 # --- Reconciler: merge bot-created/GCal twin pairs ---
 # Race: bot fires on Slack post → no GCal meeting yet → bot creates one. Later
 # GCal syncs the real calendar event, leaving a duplicate untagged copy.
@@ -793,4 +852,6 @@ if __name__ == '__main__':
     print('[reconcile] background sweep started (every 5 min)')
     threading.Thread(target=retry_loop, daemon=True).start()
     print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
+    threading.Thread(target=replay_missed_messages, daemon=True).start()
+    print('[replay] startup replay scheduled (last 24h)')
     SocketModeHandler(app, SLACK_APP_TOKEN).start()
