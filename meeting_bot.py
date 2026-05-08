@@ -698,6 +698,7 @@ def replay_missed_messages():
     except Exception as e:
         print(f'[replay] could not list channels: {e}')
         return
+    print(f'[replay] found {len(channels)} channel(s): {[c.get("name") for c in channels]}')
     cutoff = str(time.time() - 24 * 3600)
     silent_say = lambda **kw: None
     processed = 0
@@ -711,12 +712,15 @@ def replay_missed_messages():
         except Exception as e:
             print(f'[replay] history error on {cid}: {e}')
             continue
+        print(f'[replay] {ch.get("name")}: {len(msgs)} message(s) in last 24h')
+        kept = 0
         for m in reversed(msgs):  # oldest first
             if m.get('bot_id') or m.get('subtype'):
                 continue
             text = (m.get('text') or '').strip()
             if not text or not _looks_like_booking(text):
                 continue
+            kept += 1
             ts = m.get('ts')
             user_id = m.get('user')
             if not ts or not user_id:
@@ -738,7 +742,8 @@ def replay_missed_messages():
                     processed += 1
                 except Exception as e:
                     print(f'[replay] process error ts={ts}: {e}')
-    print(f'[replay] re-processed {processed} booking(s) from last 24h')
+        print(f'[replay] {ch.get("name")}: {kept} booking-shaped, {processed} processed (cumulative)')
+    print(f'[replay] done — re-processed {processed} booking(s) from last 24h')
 
 
 # --- Reconciler: merge bot-created/GCal twin pairs ---
