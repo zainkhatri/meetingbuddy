@@ -863,6 +863,75 @@ def reconcile_duplicates():
                 print(f'[reconcile] merged {bot_m["id"]} → {gcal_m["id"]}, deleted dup')
                 merged += 1
                 break
+
+    # Second pass: same owner + same exact start_time, fuzzy-similar company name.
+    # Catches the case where the bot couldn't dedup against an existing GCal
+    # meeting (e.g. spelling diff: "Franklin Maddison" vs "Franklin Madison")
+    # so it created a parallel record. Both end up with booked_at set, which the
+    # first pass skips. Here we pair by exact start-time + name similarity.
+    def _norm_company(title):
+        if not title: return ''
+        # Strip "FurtherAI + " prefix, "[conf]" brackets, "(conf)" parens
+        t = re.sub(r'^FurtherAI\s*\+\s*', '', title)
+        t = re.sub(r'\s*\[[^\]]*\]\s*', '', t)
+        t = re.sub(r'\s*\([^)]*\)\s*', '', t)
+        return re.sub(r'[^a-z0-9]', '', t.lower())
+    def _edit_distance(a, b, cap=3):
+        # Bail out early if length diff > cap
+        if abs(len(a) - len(b)) > cap: return cap + 1
+        if a == b: return 0
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            cur = [i] + [0] * len(b)
+            for j, cb in enumerate(b, 1):
+                cur[j] = min(cur[j-1]+1, prev[j]+1, prev[j-1] + (ca != cb))
+            if min(cur) > cap: return cap + 1
+            prev = cur
+        return prev[-1]
+
+    # Re-group by exact start_time (regardless of booked_at)
+    by_start = {}
+    for m in r.json().get('results', []):
+        p = m.get('properties') or {}
+        oid = p.get('hubspot_owner_id'); st = p.get('hs_meeting_start_time')
+        if not oid or not st: continue
+        by_start.setdefault((oid, st), []).append((m, p))
+    for items in by_start.values():
+        if len(items) < 2: continue
+        # Pair any two whose normalized company names match with edit distance ≤ 2
+        used = set()
+        for i, (m_a, p_a) in enumerate(items):
+            if m_a['id'] in used: continue
+            comp_a = _norm_company(p_a.get('hs_meeting_title'))
+            if not comp_a: continue
+            for m_b, p_b in items[i+1:]:
+                if m_b['id'] in used: continue
+                comp_b = _norm_company(p_b.get('hs_meeting_title'))
+                if not comp_b: continue
+                if _edit_distance(comp_a, comp_b, cap=2) > 2: continue
+                # Winner: the one WITHOUT a [bracket] tag in title (= GCal copy)
+                has_bracket_a = '[' in (p_a.get('hs_meeting_title') or '')
+                has_bracket_b = '[' in (p_b.get('hs_meeting_title') or '')
+                if has_bracket_a and not has_bracket_b:
+                    winner, loser, wp, lp = m_b, m_a, p_b, p_a
+                else:
+                    winner, loser, wp, lp = m_a, m_b, p_a, p_b
+                # Copy missing fields from loser
+                merge = {}
+                for k in ('booked_at', 'meeting_sourced_by', 'meeting_source_channel',
+                          'conference_source', 'meeting_type', 'hs_timestamp'):
+                    if lp.get(k) and not wp.get(k):
+                        merge[k] = lp[k]
+                if merge:
+                    requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{winner["id"]}',
+                                   headers=HS, json={'properties': merge}, timeout=30)
+                requests.delete(f'https://api.hubapi.com/crm/v3/objects/meetings/{loser["id"]}',
+                                headers=HS, timeout=30)
+                print(f'[reconcile-fuzzy] merged {loser["id"]} → {winner["id"]}, '
+                      f'companies "{comp_a}" vs "{comp_b}"')
+                used.add(loser['id']); used.add(winner['id'])
+                merged += 1
+                break
     return merged
 
 
