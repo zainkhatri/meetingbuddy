@@ -358,7 +358,7 @@ def hs_update_meeting(meeting_id, sourced_by, mtype=None, channel=None, conf=Non
 
 
 def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting_type, source_channel,
-                     conference_source, notes, owner_id=None):
+                     conference_source, notes, owner_id=None, company_id=None):
     # Build start time
     if date_str and time_str:
         try:
@@ -386,9 +386,16 @@ def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting
     if conference_source: props['conference_source'] = conference_source
     if owner_id: props['hubspot_owner_id'] = owner_id
     body = {'properties': props}
+    assocs = []
     if contact_id:
-        body['associations'] = [{'to': {'id': contact_id},
-                                  'types': [{'associationCategory': 'HUBSPOT_DEFINED', 'associationTypeId': 200}]}]
+        assocs.append({'to': {'id': contact_id},
+                       'types': [{'associationCategory': 'HUBSPOT_DEFINED', 'associationTypeId': 200}]})
+    if company_id:
+        # meeting -> company HUBSPOT_DEFINED association type id is 188
+        assocs.append({'to': {'id': company_id},
+                       'types': [{'associationCategory': 'HUBSPOT_DEFINED', 'associationTypeId': 188}]})
+    if assocs:
+        body['associations'] = assocs
     r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings', headers=HS, json=body, timeout=30)
     return r.json() if r.status_code in (200, 201) else None
 
@@ -533,6 +540,20 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         # hs_timestamp = "Activity date" in HubSpot UI; set to Slack announce time
         # so reports show when the meeting was booked, not when GCal first synced it.
         update_props['hs_timestamp'] = str(booked_ms)
+        # Ensure existing meeting has both contact + company associations so
+        # HubSpot reports surface who/what the meeting is with.
+        if contact_id:
+            try:
+                requests.put(
+                    f'https://api.hubapi.com/crm/v4/objects/meetings/{existing["id"]}/associations/default/contacts/{contact_id}',
+                    headers=HS, timeout=15)
+            except Exception: pass
+        if company_id:
+            try:
+                requests.put(
+                    f'https://api.hubapi.com/crm/v4/objects/meetings/{existing["id"]}/associations/default/companies/{company_id}',
+                    headers=HS, timeout=15)
+            except Exception: pass
         r_patch = requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{existing["id"]}',
                                   headers=HS, json={'properties': update_props}, timeout=30)
         if r_patch.status_code != 200:
@@ -572,6 +593,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         conference_source=parsed.get('conference_source'),
         notes=parsed.get('notes'),
         owner_id=owner_id,
+        company_id=company_id,
     )
 
     # 4. Stamp booked_at + hs_timestamp = Slack post timestamp on the new meeting.
