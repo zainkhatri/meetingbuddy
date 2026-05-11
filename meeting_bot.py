@@ -450,6 +450,11 @@ def handle_message(event, client, say, logger):
         return
 
     owner_id = slack_user_to_owner(client, user_id)
+    channel = event.get('channel')
+    try:
+        client.reactions_add(channel=channel, timestamp=ts, name='heart')
+    except Exception:
+        pass
     for parsed in bookings:
         _process_booking(parsed, text, owner_id, ts, client, say)
 
