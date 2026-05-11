@@ -718,7 +718,7 @@ def replay_missed_messages():
         try:
             rr = requests.get('https://slack.com/api/conversations.history',
                               headers=SLK,
-                              params={'channel': cid, 'oldest': cutoff, 'limit': 200},
+                              params={'channel': cid, 'oldest': cutoff, 'limit': 200, 'inclusive': 'true'},
                               timeout=20).json()
             msgs = rr.get('messages', []) or []
             print(f'[replay] {ch.get("name")}: ok={rr.get("ok")} error={rr.get("error")} '
