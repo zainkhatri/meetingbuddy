@@ -451,10 +451,11 @@ def handle_message(event, client, say, logger):
 
     owner_id = slack_user_to_owner(client, user_id)
     channel = event.get('channel')
+    print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
     try:
         client.reactions_add(channel=channel, timestamp=ts, name='heart')
-    except Exception:
-        pass
+    except Exception as e:
+        print(f'[live] reactions_add failed: {e}')
     for parsed in bookings:
         _process_booking(parsed, text, owner_id, ts, client, say)
 
@@ -481,6 +482,13 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         prefix = f'Location: {loc}'
         notes_combined = f'{prefix}\n{notes_combined}'.strip() if notes_combined else prefix
     parsed['notes'] = notes_combined or None
+
+    # Guard: a "booking" with no contact AND no company is unattachable —
+    # dedup needs a contact_id, so re-runs would create duplicate skeleton
+    # meetings titled after the location. Skip it.
+    if not (first or last or email) and not company_name:
+        print(f'[skip] booking-shaped but no contact or company: {text[:80]!r}')
+        return
 
     # 1. Find or create company
     co = hs_find_company(company_name) if company_name else None
@@ -749,12 +757,19 @@ def replay_missed_messages():
             if not bookings:
                 continue
             owner_id = slack_user_to_owner(app.client, user_id)
+            any_ok = False
             for parsed in bookings:
                 try:
                     _process_booking(parsed, text, owner_id, ts, app.client, silent_say)
                     processed += 1
+                    any_ok = True
                 except Exception as e:
                     print(f'[replay] process error ts={ts}: {e}')
+            if any_ok:
+                try:
+                    app.client.reactions_add(channel=cid, timestamp=ts, name='heart')
+                except Exception:
+                    pass
         print(f'[replay] {ch.get("name")}: {kept} booking-shaped, {processed} processed (cumulative)')
     print(f'[replay] done — re-processed {processed} booking(s) from last 24h')
 
