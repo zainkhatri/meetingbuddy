@@ -425,6 +425,27 @@ def slack_user_to_owner(slack_client, slack_user_id):
     return None
 
 
+# In-memory set of Slack ts values this process has already begun processing.
+# Prevents the live handler and the live_sweep thread from racing on the
+# same message. The HubSpot booked_at dedup is the long-term cross-restart
+# protection; this set covers within-process races.
+PROCESSED_TS = set()
+PROCESSED_TS_LOCK = threading.Lock()
+
+
+def _claim_ts(ts):
+    """Returns True if this caller is the first to claim `ts`. False otherwise."""
+    with PROCESSED_TS_LOCK:
+        if ts in PROCESSED_TS:
+            return False
+        PROCESSED_TS.add(ts)
+        # Keep the set bounded — cap at 5000 oldest entries
+        if len(PROCESSED_TS) > 5000:
+            PROCESSED_TS.clear()
+            PROCESSED_TS.add(ts)
+        return True
+
+
 @app.event('message')
 def handle_message(event, client, say, logger):
     # Bot messages: skip
@@ -450,6 +471,9 @@ def handle_message(event, client, say, logger):
         user_id = event.get('user')
         ts = event.get('ts')
     if not text or not ts:
+        return
+    if not _claim_ts(ts):
+        print(f'[live] ts={ts} already claimed (sweep beat us) — skipping')
         return
 
     # Parse — Claude may return a single dict or a list of dicts (multi-booking post)
@@ -730,9 +754,11 @@ def _looks_like_booking(text):
     t = (text or '').lower()
     return any(kw in t for kw in ('meeting', 'demo', 'booked', 'call with', 'intro'))
 
+SLK = {'Authorization': f'Bearer {SLACK_BOT_TOKEN}'}
+
+
 def replay_missed_messages():
     time.sleep(5)  # let the socket connect first
-    SLK = {'Authorization': f'Bearer {SLACK_BOT_TOKEN}'}
     try:
         rr = requests.get('https://slack.com/api/users.conversations',
                           headers=SLK,
@@ -996,6 +1022,92 @@ def reconcile_loop():
         time.sleep(300)
 
 
+def live_sweep_loop():
+    """Backup to the live Socket Mode handler: every 30 seconds, look at the
+    last ~120s of #bdr-team and process any booking-shaped message we
+    haven't already claimed in-process. If the websocket ever misses an
+    event, this catches it within at most ~30s.
+
+    Dedup: in-memory PROCESSED_TS prevents racing with the live handler;
+    HubSpot booked_at search prevents racing across restarts.
+    """
+    print('[sweep] live sweep loop started (every 30s, 120s window)')
+    while True:
+        time.sleep(30)
+        try:
+            # Find #bdr-team channel id
+            chans = requests.get('https://slack.com/api/users.conversations',
+                                 headers=SLK,
+                                 params={'types': 'public_channel,private_channel', 'limit': 200},
+                                 timeout=15).json().get('channels', []) or []
+            for ch in chans:
+                cid = ch.get('id')
+                if not cid:
+                    continue
+                oldest = str(int(time.time() - 120))
+                rr = requests.get('https://slack.com/api/conversations.history',
+                                  headers=SLK,
+                                  params={'channel': cid, 'oldest': oldest, 'limit': 50, 'inclusive': 'true'},
+                                  timeout=15).json()
+                if not rr.get('ok'):
+                    continue
+                for m in reversed(rr.get('messages') or []):
+                    if m.get('bot_id') or m.get('subtype'):
+                        continue
+                    text = (m.get('text') or '').strip()
+                    ts = m.get('ts')
+                    user_id = m.get('user')
+                    if not text or not ts or not user_id:
+                        continue
+                    if not _looks_like_booking(text):
+                        continue
+                    if not _claim_ts(ts):
+                        continue  # live handler beat us, or already processed this tick
+                    # HubSpot dedup: if booked_at already tagged, skip and just heart
+                    booked_ms = int(float(ts) * 1000)
+                    try:
+                        dup = requests.post(
+                            'https://api.hubapi.com/crm/v3/objects/meetings/search',
+                            headers=HS,
+                            json={'filterGroups': [{'filters': [
+                                {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
+                            ]}], 'properties': ['hs_meeting_title'], 'limit': 1},
+                            timeout=10)
+                        already_tagged = dup.status_code == 200 and dup.json().get('total', 0) > 0
+                    except Exception:
+                        already_tagged = False
+                    # Always try the heart; Slack returns already_reacted harmlessly
+                    try:
+                        requests.post('https://slack.com/api/reactions.add', headers=SLK,
+                                      data={'channel': cid, 'timestamp': ts, 'name': 'heart'},
+                                      timeout=10)
+                    except Exception:
+                        pass
+                    if already_tagged:
+                        continue
+                    print(f'[sweep] catching missed booking ts={ts}')
+                    try:
+                        parsed_raw = parse_with_claude(text)
+                    except Exception as e:
+                        print(f'[sweep] parse error ts={ts}: {e}')
+                        continue
+                    if not parsed_raw:
+                        continue
+                    bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
+                    bookings = [b for b in bookings if b and b.get('is_booking')]
+                    if not bookings:
+                        continue
+                    owner_id = slack_user_to_owner(app.client, user_id)
+                    silent_say = lambda **kw: None
+                    for parsed in bookings:
+                        try:
+                            _process_booking(parsed, text, owner_id, ts, app.client, silent_say)
+                        except Exception as e:
+                            print(f'[sweep] process error ts={ts}: {e}')
+        except Exception as e:
+            print(f'[sweep] outer error: {e}')
+
+
 LAST_EVENT_AT = time.time()
 
 
@@ -1080,6 +1192,7 @@ if __name__ == '__main__':
     print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
     threading.Thread(target=replay_missed_messages, daemon=True).start()
     print('[replay] startup replay scheduled (last 24h)')
+    threading.Thread(target=live_sweep_loop, daemon=True).start()
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     threading.Thread(target=socket_watchdog, args=(handler,), daemon=True).start()
     print('[watchdog] socket health watchdog started (30s checks, 120s tolerance)')
