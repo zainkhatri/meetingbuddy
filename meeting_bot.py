@@ -1017,18 +1017,11 @@ def periodic_restart(interval_seconds=1800):
     os._exit(0)
 
 
-def event_flow_watchdog(idle_seconds=600):
-    # If no Slack events of any kind arrive in 10 min, the socket is
-    # silently dead even though is_connected() may return True. Slack
-    # sends frequent low-level events (hello, presence_change, typing)
-    # in any active workspace; 10 min of total silence is anomalous.
-    # exit(0) preserves Railway's restart budget.
-    while True:
-        time.sleep(60)
-        idle = time.time() - LAST_EVENT_AT
-        if idle >= idle_seconds:
-            print(f'[event-watchdog] no Slack events in {int(idle)}s — exiting for clean restart')
-            os._exit(0)
+# NOTE: removed event_flow_watchdog. It killed the bot every ~10 min because
+# the bot only sees events from channels it's a member of (#bdr-team), and
+# that channel is regularly quiet for longer than 10 min. Constant restarts
+# made the bot feel non-autonomous. Rely on socket_watchdog +
+# slack_rest_watchdog + periodic_restart instead.
 
 
 def slack_rest_watchdog():
@@ -1090,8 +1083,6 @@ if __name__ == '__main__':
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     threading.Thread(target=socket_watchdog, args=(handler,), daemon=True).start()
     print('[watchdog] socket health watchdog started (30s checks, 120s tolerance)')
-    threading.Thread(target=event_flow_watchdog, daemon=True).start()
-    print('[event-watchdog] event-flow watchdog started (60s checks, 600s idle limit)')
     threading.Thread(target=slack_rest_watchdog, daemon=True).start()
     print('[rest-watchdog] Slack REST auth.test watchdog started (every 5 min)')
     threading.Thread(target=periodic_restart, daemon=True).start()
