@@ -5,7 +5,6 @@
   },
   "deploy": {
     "startCommand": "python -u meeting_bot.py",
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyType": "ALWAYS"
   }
 }
