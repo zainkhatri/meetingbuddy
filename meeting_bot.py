@@ -103,6 +103,11 @@ Schema:
 
 `location` is the physical or virtual where (booth, table number, room, address, Zoom). It does NOT belong in conference_source.
 
+conference_source rules:
+  - Set ONLY from the EVENT named in the header or Source line ("INSURTECH INSIGHTS MEETING!", "Source: Brella (Insurtech Insights)", "RIMS RISKWORLD 2026", "Insurance Innovators", "MFLive (Insurance Innovators Nashville)", etc.).
+  - DO NOT infer conference_source from words in the COMPANY NAME. A company called "Greater New York Insurance Companies", "InsurTech NY Holdings", "Nashville Brokers", or "Rims Solutions Inc" tells you nothing about which conference the meeting belongs to — only the explicit event tag does.
+  - If the post has no explicit conference header AND no conference in Source → conference_source=null.
+
 source_channel mapping:
   - "Source: Email" / cold email phrasing → "email"
   - "Source: LinkedIn" / LinkedIn URL or DM mentioned as the channel → "linkedin"
