@@ -1007,29 +1007,48 @@ def _track_last_event(next, body):
     next()
 
 
-def hourly_restart(interval_seconds=3600):
-    # Force a periodic process exit so Railway recycles the container.
-    # is_connected() can return True for a half-dead socket (the actual
-    # failure mode we hit: process up, websocket "connected", but Slack
-    # events stop arriving). Hard restart sidesteps it entirely; the
-    # startup replay + booked_at dedup guard make this safe.
+def periodic_restart(interval_seconds=1800):
+    # Unconditional restart every 30 min. Most reliable defense against
+    # any future "socket up, events stopped" failure mode we haven't yet
+    # observed. Startup replay + booked_at dedup make recycling safe.
+    # Uses exit(0) so Railway's ON_FAILURE restart cap isn't burned.
     time.sleep(interval_seconds)
-    print(f'[hourly-restart] {interval_seconds}s elapsed — exiting so Railway restarts')
+    print(f'[periodic-restart] {interval_seconds}s elapsed — exiting for clean restart')
     os._exit(0)
 
 
-def event_flow_watchdog(idle_seconds=900):
-    # Belt-and-suspenders: if no Slack events of any kind have arrived in
-    # `idle_seconds` (default 15 min), the socket is silently dead. Exit.
-    # Slack sends frequent low-level events (presence_change, user_typing,
-    # hello, etc.) in any active workspace, so 15 min of total silence is
-    # a strong signal something is wrong.
+def event_flow_watchdog(idle_seconds=600):
+    # If no Slack events of any kind arrive in 10 min, the socket is
+    # silently dead even though is_connected() may return True. Slack
+    # sends frequent low-level events (hello, presence_change, typing)
+    # in any active workspace; 10 min of total silence is anomalous.
+    # exit(0) preserves Railway's restart budget.
     while True:
         time.sleep(60)
         idle = time.time() - LAST_EVENT_AT
         if idle >= idle_seconds:
-            print(f'[event-watchdog] no Slack events in {int(idle)}s — exiting so Railway restarts')
-            os._exit(1)
+            print(f'[event-watchdog] no Slack events in {int(idle)}s — exiting for clean restart')
+            os._exit(0)
+
+
+def slack_rest_watchdog():
+    # Final layer: verify the Slack REST API is reachable from this
+    # container every 5 min via auth.test. A failure here means the
+    # token, network, or Slack itself is broken — exit so Railway can
+    # try a fresh container.
+    while True:
+        time.sleep(300)
+        try:
+            r = requests.get('https://slack.com/api/auth.test',
+                             headers={'Authorization': f'Bearer {SLACK_BOT_TOKEN}'},
+                             timeout=15)
+            ok = r.status_code == 200 and r.json().get('ok')
+        except Exception as e:
+            print(f'[rest-watchdog] auth.test errored: {e}')
+            ok = False
+        if not ok:
+            print('[rest-watchdog] Slack REST unreachable — exiting for clean restart')
+            os._exit(0)
 
 
 def socket_watchdog(handler, max_disconnected_seconds=120):
@@ -1072,7 +1091,9 @@ if __name__ == '__main__':
     threading.Thread(target=socket_watchdog, args=(handler,), daemon=True).start()
     print('[watchdog] socket health watchdog started (30s checks, 120s tolerance)')
     threading.Thread(target=event_flow_watchdog, daemon=True).start()
-    print('[event-watchdog] event-flow watchdog started (60s checks, 900s idle limit)')
-    threading.Thread(target=hourly_restart, daemon=True).start()
-    print('[hourly-restart] scheduled in 3600s')
+    print('[event-watchdog] event-flow watchdog started (60s checks, 600s idle limit)')
+    threading.Thread(target=slack_rest_watchdog, daemon=True).start()
+    print('[rest-watchdog] Slack REST auth.test watchdog started (every 5 min)')
+    threading.Thread(target=periodic_restart, daemon=True).start()
+    print('[periodic-restart] scheduled in 1800s')
     handler.start()
