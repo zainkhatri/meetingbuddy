@@ -994,6 +994,42 @@ def reconcile_loop():
         time.sleep(300)
 
 
+LAST_EVENT_AT = time.time()
+
+
+@app.middleware
+def _track_last_event(next, body):
+    # Update on every inbound Slack event (message, reaction, hello, etc.)
+    global LAST_EVENT_AT
+    LAST_EVENT_AT = time.time()
+    next()
+
+
+def hourly_restart(interval_seconds=3600):
+    # Force a periodic process exit so Railway recycles the container.
+    # is_connected() can return True for a half-dead socket (the actual
+    # failure mode we hit: process up, websocket "connected", but Slack
+    # events stop arriving). Hard restart sidesteps it entirely; the
+    # startup replay + booked_at dedup guard make this safe.
+    time.sleep(interval_seconds)
+    print(f'[hourly-restart] {interval_seconds}s elapsed — exiting so Railway restarts')
+    os._exit(0)
+
+
+def event_flow_watchdog(idle_seconds=900):
+    # Belt-and-suspenders: if no Slack events of any kind have arrived in
+    # `idle_seconds` (default 15 min), the socket is silently dead. Exit.
+    # Slack sends frequent low-level events (presence_change, user_typing,
+    # hello, etc.) in any active workspace, so 15 min of total silence is
+    # a strong signal something is wrong.
+    while True:
+        time.sleep(60)
+        idle = time.time() - LAST_EVENT_AT
+        if idle >= idle_seconds:
+            print(f'[event-watchdog] no Slack events in {int(idle)}s — exiting so Railway restarts')
+            os._exit(1)
+
+
 def socket_watchdog(handler, max_disconnected_seconds=120):
     # Exit the process if Socket Mode reports disconnected for too long, so
     # Railway's restart policy can recycle the container. Without this the
@@ -1033,4 +1069,8 @@ if __name__ == '__main__':
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     threading.Thread(target=socket_watchdog, args=(handler,), daemon=True).start()
     print('[watchdog] socket health watchdog started (30s checks, 120s tolerance)')
+    threading.Thread(target=event_flow_watchdog, daemon=True).start()
+    print('[event-watchdog] event-flow watchdog started (60s checks, 900s idle limit)')
+    threading.Thread(target=hourly_restart, daemon=True).start()
+    print('[hourly-restart] scheduled in 3600s')
     handler.start()
