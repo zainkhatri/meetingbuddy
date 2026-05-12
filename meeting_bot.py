@@ -779,6 +779,25 @@ def replay_missed_messages():
             if not bookings:
                 continue
             owner_id = slack_user_to_owner(app.client, user_id)
+            # Replay-dedup guard: if any HubSpot meeting already carries this
+            # Slack post's booked_at, the post was processed on a prior run.
+            # Re-running risks Claude normalizing a name differently and
+            # creating a parallel record the reconciler then has to merge
+            # (e.g. "Franklin Maddison" vs "Franklin Madison").
+            booked_ms = int(float(ts) * 1000)
+            try:
+                dup_search = requests.post(
+                    'https://api.hubapi.com/crm/v3/objects/meetings/search',
+                    headers=HS,
+                    json={'filterGroups': [{'filters': [
+                        {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
+                    ]}], 'properties': ['hs_meeting_title'], 'limit': 1},
+                    timeout=15)
+                if dup_search.status_code == 200 and dup_search.json().get('total', 0) > 0:
+                    print(f'[replay] skip ts={ts}: booked_at already tagged on an existing meeting')
+                    continue
+            except Exception as e:
+                print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
             any_ok = False
             for parsed in bookings:
                 try:
