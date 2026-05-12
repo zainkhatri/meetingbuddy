@@ -743,7 +743,9 @@ def replay_missed_messages():
         print(f'[replay] could not list channels: {e}')
         return
     print(f'[replay] found {len(channels)} channel(s): {[c.get("name") for c in channels]}')
-    cutoff = str(time.time() - 24 * 3600)
+    # Slack's conversations.history rejects float-formatted `oldest` (e.g.
+    # "1778530757.15") and silently returns msgs=0. Must be int seconds.
+    cutoff = str(int(time.time() - 24 * 3600))
     silent_say = lambda **kw: None
     processed = 0
     for ch in channels:
