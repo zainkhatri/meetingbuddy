@@ -970,6 +970,34 @@ def reconcile_loop():
         time.sleep(300)
 
 
+def socket_watchdog(handler, max_disconnected_seconds=120):
+    # Exit the process if Socket Mode reports disconnected for too long, so
+    # Railway's restart policy can recycle the container. Without this the
+    # process can stay "alive" with a dead websocket and silently miss messages.
+    disconnected_since = None
+    while True:
+        time.sleep(30)
+        try:
+            connected = handler.client is not None and handler.client.is_connected()
+        except Exception as e:
+            print(f'[watchdog] is_connected check failed: {e}')
+            connected = False
+        now = time.time()
+        if connected:
+            if disconnected_since is not None:
+                print(f'[watchdog] socket reconnected after {int(now - disconnected_since)}s')
+            disconnected_since = None
+            continue
+        if disconnected_since is None:
+            disconnected_since = now
+            print('[watchdog] socket reported disconnected')
+            continue
+        elapsed = now - disconnected_since
+        if elapsed >= max_disconnected_seconds:
+            print(f'[watchdog] socket dead for {int(elapsed)}s — exiting so Railway restarts')
+            os._exit(1)
+
+
 if __name__ == '__main__':
     print('Meeting Bot starting (Socket Mode)...')
     threading.Thread(target=reconcile_loop, daemon=True).start()
@@ -978,4 +1006,7 @@ if __name__ == '__main__':
     print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
     threading.Thread(target=replay_missed_messages, daemon=True).start()
     print('[replay] startup replay scheduled (last 24h)')
-    SocketModeHandler(app, SLACK_APP_TOKEN).start()
+    handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+    threading.Thread(target=socket_watchdog, args=(handler,), daemon=True).start()
+    print('[watchdog] socket health watchdog started (30s checks, 120s tolerance)')
+    handler.start()
