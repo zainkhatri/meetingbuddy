@@ -355,6 +355,9 @@ def hs_update_meeting(meeting_id, sourced_by, mtype=None, channel=None, conf=Non
     if mtype: props['meeting_type'] = mtype
     if channel: props['meeting_source_channel'] = channel
     if conf: props['conference_source'] = conf
+    # Mirror conference tag to the native HubSpot "Call and meeting type" field
+    # (hs_activity_type) so it shows up on the meeting record card in the UI.
+    if mtype == 'conference': props['hs_activity_type'] = 'Conference'
     if not props:
         return False
     r = requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{meeting_id}',
@@ -389,6 +392,7 @@ def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting
     if meeting_type: props['meeting_type'] = meeting_type
     if source_channel: props['meeting_source_channel'] = source_channel
     if conference_source: props['conference_source'] = conference_source
+    if meeting_type == 'conference': props['hs_activity_type'] = 'Conference'
     if owner_id: props['hubspot_owner_id'] = owner_id
     body = {'properties': props}
     assocs = []
@@ -556,6 +560,8 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         }
         if parsed.get('meeting_type'):
             update_props['meeting_type'] = parsed['meeting_type']
+            if parsed['meeting_type'] == 'conference':
+                update_props['hs_activity_type'] = 'Conference'
         if parsed.get('source_channel'):
             update_props['meeting_source_channel'] = parsed['source_channel']
         # Conference: prefer Claude's call, fall back to title pattern on the EXISTING meeting
@@ -638,7 +644,10 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         # also lets the retry loop re-apply tags if anything resets them.
         full_props = dict(stamp_props)
         if owner_id: full_props['meeting_sourced_by'] = owner_id
-        if parsed.get('meeting_type'): full_props['meeting_type'] = parsed['meeting_type']
+        if parsed.get('meeting_type'):
+            full_props['meeting_type'] = parsed['meeting_type']
+            if parsed['meeting_type'] == 'conference':
+                full_props['hs_activity_type'] = 'Conference'
         if parsed.get('source_channel'): full_props['meeting_source_channel'] = parsed['source_channel']
         if parsed.get('conference_source'): full_props['conference_source'] = parsed['conference_source']
         enqueue_retry(mtg['id'], full_props)
@@ -906,6 +915,8 @@ def reconcile_duplicates():
                     v = bot_p.get(k)
                     if v and not gcal_p.get(k):
                         merge_props[k] = v
+                if merge_props.get('meeting_type') == 'conference':
+                    merge_props['hs_activity_type'] = 'Conference'
                 if merge_props:
                     requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{gcal_m["id"]}',
                                    headers=HS, json={'properties': merge_props}, timeout=30)
@@ -974,6 +985,8 @@ def reconcile_duplicates():
                           'conference_source', 'meeting_type', 'hs_timestamp'):
                     if lp.get(k) and not wp.get(k):
                         merge[k] = lp[k]
+                if merge.get('meeting_type') == 'conference':
+                    merge['hs_activity_type'] = 'Conference'
                 if merge:
                     requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{winner["id"]}',
                                    headers=HS, json={'properties': merge}, timeout=30)
