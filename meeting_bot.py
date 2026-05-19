@@ -837,6 +837,15 @@ def replay_missed_messages():
                     timeout=15)
                 if dup_search.status_code == 200 and dup_search.json().get('total', 0) > 0:
                     print(f'[replay] skip ts={ts}: booked_at already tagged on an existing meeting')
+                    # Recover the heart in case the original processor crashed
+                    # after tagging HubSpot but before reacting (or reactions_add
+                    # failed silently). Slack returns already_reacted harmlessly.
+                    try:
+                        requests.post('https://slack.com/api/reactions.add', headers=SLK,
+                                      data={'channel': cid, 'timestamp': ts, 'name': 'heart'},
+                                      timeout=10)
+                    except Exception:
+                        pass
                     continue
             except Exception as e:
                 print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
