@@ -5,8 +5,9 @@ Single public function: upsert_meeting_row(payload). Match key is
 never blank a non-empty cell with an empty value (BDR-added context
 in Notes/AE/Location/Follow-Up is preserved).
 
-Configured via env:
-  GOOGLE_SERVICE_ACCOUNT_JSON  raw JSON of a service account key
+Configured via env (reuses conference_buddy's OAuth token):
+  GOOGLE_SHEETS_TOKEN          path to OAuth token JSON on disk
+  GOOGLE_SHEETS_TOKEN_JSON     (Railway) raw JSON, materialized to GOOGLE_SHEETS_TOKEN at boot
   ELLEN_SHEET_ID               spreadsheet id
   ELLEN_TAB_NAME               worksheet/tab name (default: "Full Meeting Tracker")
 
@@ -25,7 +26,8 @@ log = logging.getLogger(__name__)
 
 SHEET_ID = os.environ.get('ELLEN_SHEET_ID')
 TAB_NAME = os.environ.get('ELLEN_TAB_NAME', 'Full Meeting Tracker')
-SA_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+TOKEN_PATH = os.environ.get('GOOGLE_SHEETS_TOKEN')
+TOKEN_JSON = os.environ.get('GOOGLE_SHEETS_TOKEN_JSON')  # Railway: materialized to TOKEN_PATH
 
 # Conference slug → display name in Ellen's sheet
 CONFERENCE_DISPLAY = {
@@ -84,6 +86,18 @@ _ws = None  # cached worksheet handle
 _headers = None  # cached header row mapping (name → 1-based col index)
 
 
+def _materialize_token():
+    """If running on Railway with GOOGLE_SHEETS_TOKEN_JSON, write it to GOOGLE_SHEETS_TOKEN path."""
+    if not (TOKEN_PATH and TOKEN_JSON):
+        return
+    from pathlib import Path
+    p = Path(TOKEN_PATH)
+    if p.exists():
+        return
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(TOKEN_JSON)
+
+
 def _connect():
     """Build (or return cached) gspread worksheet handle. None if unconfigured."""
     global _ws, _headers
@@ -92,16 +106,26 @@ def _connect():
     with _client_lock:
         if _ws is not None:
             return _ws
-        if not (SHEET_ID and SA_JSON):
-            log.warning('sheet_sync unconfigured (missing ELLEN_SHEET_ID or GOOGLE_SERVICE_ACCOUNT_JSON)')
+        if not (SHEET_ID and TOKEN_PATH):
+            log.warning('sheet_sync unconfigured (missing ELLEN_SHEET_ID or GOOGLE_SHEETS_TOKEN)')
             return None
         try:
+            _materialize_token()
             import gspread
-            from google.oauth2.service_account import Credentials
-            creds = Credentials.from_service_account_info(
-                json.loads(SA_JSON),
-                scopes=['https://www.googleapis.com/auth/spreadsheets'],
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            with open(TOKEN_PATH) as f:
+                tok = json.load(f)
+            creds = Credentials(
+                token=tok['token'], refresh_token=tok['refresh_token'],
+                token_uri=tok['token_uri'], client_id=tok['client_id'],
+                client_secret=tok['client_secret'], scopes=tok['scopes'],
             )
+            if creds.expired or not creds.valid:
+                creds.refresh(Request())
+                tok['token'] = creds.token
+                with open(TOKEN_PATH, 'w') as f:
+                    json.dump(tok, f)
             gc = gspread.authorize(creds)
             sh = gc.open_by_key(SHEET_ID)
             _ws = sh.worksheet(TAB_NAME)
