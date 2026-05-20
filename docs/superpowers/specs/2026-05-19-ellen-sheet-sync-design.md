@@ -92,9 +92,9 @@ Standalone script. Run via Railway cron `0 6 * * *`.
 | Sheet Column | Bot Source | Notes |
 |---|---|---|
 | Conference | `detect_conference_from_title/date` | Already implemented |
-| Meeting Sourced By | `meeting_sourced_by` (Slack user → display name) | "Aman", "Dani", "Jacob", "Zain", etc. |
+| Meeting Sourced By | Slack poster → display name | Whoever dropped the message: Zain, Dani, Jacob, etc. |
 | Account Executive | _blank_ | BDRs fill manually |
-| FurtherAI Rep in Meeting | owner display name (from `hubspot_owner_id`) | Usually same as Sourced By |
+| FurtherAI Rep in Meeting | _blank_ | BDRs fill manually (often differs from sourced by) |
 | Meeting Date | `hs_meeting_start_time` → `M/D` | ET timezone |
 | Meeting Time | `hs_meeting_start_time` → `H:MM AM/PM ET` | ET timezone |
 | Meeting Location | _blank_ | Not tracked by bot |
