@@ -56,15 +56,18 @@ def apollo_enrich(first, last, company, email=None):
     contact = person.get('contact') if isinstance(person.get('contact'), dict) else None
     if contact and isinstance(contact.get('phone_numbers'), list):
         phones += contact['phone_numbers']
-    type_rank = {'work_direct': 0, 'work': 1, 'hq': 2, 'mobile': 3, 'home': 4}
-    phones.sort(key=lambda x: type_rank.get((x.get('type') or '').lower(), 9))
+    # Personal lines first. HQ = company switchboard — useless, skip entirely.
+    type_rank = {'mobile': 0, 'work_direct': 1, 'work': 2, 'home': 3}
+    keep = [p for p in phones if (p.get('type') or '').lower() != 'hq']
+    keep.sort(key=lambda x: type_rank.get((x.get('type') or '').lower(), 9))
     seen, ordered = set(), []
-    for p in phones:
+    for p in keep:
         s = (p.get('sanitized_number') or p.get('raw_number') or '').strip()
         if s and s not in seen:
             seen.add(s); ordered.append(s)
     if ordered:
-        out['phone'] = ordered[0]  # prefer the most direct number
+        out['phone'] = ordered[0]
+        out['phone_type'] = (keep[0].get('type') or '').lower() if keep else ''
     return out
 
 # Allow `import sheet_sync` regardless of CWD
