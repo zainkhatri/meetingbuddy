@@ -1118,6 +1118,25 @@ def reconcile_loop():
         time.sleep(300)
 
 
+def sheet_reconcile_loop():
+    """Run scripts/sheet_reconcile.py once a day (24h), backfilling Apollo
+    enrichment for any meeting the inline write missed phones/emails on.
+    Sleeps 60s on boot to let everything else settle first."""
+    import subprocess
+    time.sleep(60)
+    while True:
+        try:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'sheet_reconcile.py')
+            r = subprocess.run(['python3', script, '--since', '14'], capture_output=True, timeout=900)
+            print(f'[sheet-reconcile] exit={r.returncode}')
+            for line in (r.stdout.decode('utf-8', 'replace').splitlines()[-5:]
+                         + r.stderr.decode('utf-8', 'replace').splitlines()[-3:]):
+                print(f'[sheet-reconcile] {line}')
+        except Exception as e:
+            print(f'[sheet-reconcile] error: {e}')
+        time.sleep(24 * 3600)
+
+
 def live_sweep_loop():
     """Backup to the live Socket Mode handler: every 30 seconds, look at the
     last ~120s of #bdr-team and process any booking-shaped message we
@@ -1283,6 +1302,7 @@ def socket_watchdog(handler, max_disconnected_seconds=120):
 if __name__ == '__main__':
     print('Meeting Bot starting (Socket Mode)...')
     threading.Thread(target=reconcile_loop, daemon=True).start()
+    threading.Thread(target=sheet_reconcile_loop, daemon=True).start()
     print('[reconcile] background sweep started (every 5 min)')
     threading.Thread(target=retry_loop, daemon=True).start()
     print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
