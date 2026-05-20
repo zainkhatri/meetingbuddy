@@ -96,7 +96,7 @@ Schema:
   "company_name": string|null,
   "meeting_type": "intro"|"demo"|"scoping"|"discovery"|"followup"|"checkin"|"conference"|null,
   "source_channel": "email"|"linkedin"|"referral"|"call"|"conference"|"inbound"|null,
-  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"tmpcc"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"iiusa"|"insurance_insider"|"other"|null,
+  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"tmpcc"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"other"|null,
   "meeting_date": "YYYY-MM-DD"|null,
   "meeting_time_utc": "HH:MM"|null,
   "location": string|null,
@@ -109,6 +109,7 @@ conference_source rules:
   - Set ONLY from the EVENT named in the header or Source line ("INSURTECH INSIGHTS MEETING!", "Source: Brella (Insurtech Insights)", "RIMS RISKWORLD 2026", "Insurance Innovators", "MFLive (Insurance Innovators Nashville)", etc.).
   - DO NOT infer conference_source from words in the COMPANY NAME. A company called "Greater New York Insurance Companies", "InsurTech NY Holdings", "Nashville Brokers", or "Rims Solutions Inc" tells you nothing about which conference the meeting belongs to — only the explicit event tag does.
   - If the post has no explicit conference header AND no conference in Source → conference_source=null.
+  - Synonyms: "IIUSA" / "Insurance Innovators USA" → conference_source=insurance_innovators (same event).
 
 source_channel mapping:
   - "Source: Email" / cold email phrasing → "email"
