@@ -63,6 +63,10 @@ def search_meetings(since_ms):
 
 INTERNAL_EMAIL_DOMAINS = ('@furtherai.com', '@further.ai')
 
+# Real BDR roster — only meetings sourced by (or owned by) these get into Ellen's sheet.
+# Per Zain's stance: AEs / Aman / reps may attend but don't source for the BDR dashboard.
+BDR_OWNER_IDS = {'88760040', '162210484', '82377567'}  # Zain, Jacob, Dani
+
 
 def _is_internal(email):
     e = (email or '').lower()
@@ -117,6 +121,12 @@ def main():
         mid = m['id']
         p = m.get('properties') or {}
         if (p.get('hs_meeting_outcome') or '') in ('CANCELED', 'NO_SHOW'):
+            continue
+        # Only sync meetings owned/sourced by a real BDR
+        src = str(p.get('meeting_sourced_by') or '')
+        own = str(p.get('hubspot_owner_id') or '')
+        if src not in BDR_OWNER_IDS and own not in BDR_OWNER_IDS:
+            counts['skipped'] += 1
             continue
         try:
             contact, company = get_meeting_associations(mid)
