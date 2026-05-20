@@ -81,7 +81,7 @@ Both are valid bookings — set is_booking=true for either.
 
 MULTIPLE BOOKINGS in one message: if the post announces N distinct meetings (different contact AND/OR different company, e.g. "Two booth meetings confirmed: 1. ... 2. ..."), return a JSON ARRAY of N booking objects, one per meeting. If it's a single meeting (even with co-attendees from the same company), return a single object.
 
-Format B header signals the meeting context: "TARGET MARKETS" → conference_source=target_markets_midyear or tmpaa/tmpcc; "DEMO" → meeting_type=demo; bare "MEETING!" with no conference → infer from source_channel.
+Format B header signals the meeting context: "TARGET MARKETS" / "TMPAA" / "TMPCC" → conference_source=tmpaa (all Target Markets / TMPAA events are one bucket); "DEMO" → meeting_type=demo; bare "MEETING!" with no conference → infer from source_channel.
 
 Return ONLY valid JSON (no prose). If a field is not mentioned, use null.
 
@@ -96,7 +96,7 @@ Schema:
   "company_name": string|null,
   "meeting_type": "intro"|"demo"|"scoping"|"discovery"|"followup"|"checkin"|"conference"|null,
   "source_channel": "email"|"linkedin"|"referral"|"call"|"conference"|"inbound"|null,
-  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"tmpcc"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"other"|null,
+  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"other"|null,
   "meeting_date": "YYYY-MM-DD"|null,
   "meeting_time_utc": "HH:MM"|null,
   "location": string|null,
@@ -110,6 +110,7 @@ conference_source rules:
   - DO NOT infer conference_source from words in the COMPANY NAME. A company called "Greater New York Insurance Companies", "InsurTech NY Holdings", "Nashville Brokers", or "Rims Solutions Inc" tells you nothing about which conference the meeting belongs to — only the explicit event tag does.
   - If the post has no explicit conference header AND no conference in Source → conference_source=null.
   - Synonyms: "IIUSA" / "Insurance Innovators USA" → conference_source=insurance_innovators (same event).
+  - Synonyms: "TMPAA" / "TMPCC" / "Target Markets" / "Target Markets Mid-Year" / "Target Markets Annual" → conference_source=tmpaa (same org, one bucket).
 
 source_channel mapping:
   - "Source: Email" / cold email phrasing → "email"
