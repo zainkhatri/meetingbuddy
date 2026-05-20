@@ -334,13 +334,22 @@ def upsert_meeting_row(payload):
             log.exception('sheet_sync append failed')
             return {'action': 'error', 'error': str(e)}
 
-    # Update: preserve any non-empty existing cell when our payload value is empty
+    # Update: bot can only FILL empty cells, never overwrite BDR-curated content.
+    # If the existing cell has any value, keep it. Only write to empty cells.
     current = rows[existing_row - 1] if len(rows) >= existing_row else []
     merged = []
+    any_change = False
     for i, h in enumerate(header_row):
         new_val = payload.get(h.strip(), '')
         old_val = current[i] if i < len(current) else ''
-        merged.append(new_val if new_val else old_val)
+        if old_val.strip():
+            merged.append(old_val)
+        else:
+            merged.append(new_val)
+            if new_val:
+                any_change = True
+    if not any_change:
+        return {'action': 'updated', 'row': existing_row, 'noop': True}
 
     try:
         end_col = _col_letter(len(header_row))
