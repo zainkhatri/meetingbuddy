@@ -61,8 +61,17 @@ def search_meetings(since_ms):
             return
 
 
+INTERNAL_EMAIL_DOMAINS = ('@furtherai.com', '@further.ai')
+
+
+def _is_internal(email):
+    e = (email or '').lower()
+    return any(d in e for d in INTERNAL_EMAIL_DOMAINS)
+
+
 def get_meeting_associations(meeting_id):
-    """Return (contact, company) tuples — first associated contact + company, with properties."""
+    """Return (contact, company) — first NON-INTERNAL associated contact + company.
+    Skips contacts with @furtherai.com / @further.ai emails (BDRs / team)."""
     contact = None
     company = None
     rc = requests.get(f'https://api.hubapi.com/crm/v4/objects/meetings/{meeting_id}/associations/contacts',
@@ -72,9 +81,13 @@ def get_meeting_associations(meeting_id):
             cid = str(a['toObjectId'])
             rg = requests.get(f'https://api.hubapi.com/crm/v3/objects/contacts/{cid}',
                               headers=HS, params={'properties': 'firstname,lastname,jobtitle,email'}, timeout=15)
-            if rg.status_code == 200:
-                contact = rg.json().get('properties') or {}
-                break
+            if rg.status_code != 200:
+                continue
+            props = rg.json().get('properties') or {}
+            if _is_internal(props.get('email')):
+                continue  # skip internal teammates
+            contact = props
+            break
     rco = requests.get(f'https://api.hubapi.com/crm/v4/objects/meetings/{meeting_id}/associations/companies',
                        headers=HS, timeout=15)
     if rco.status_code == 200:

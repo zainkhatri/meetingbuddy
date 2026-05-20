@@ -237,8 +237,36 @@ def build_payload(*, conference_slug, sourced_by_owner_id, meeting_start_ms,
     }
 
 
-def _find_row(rows, company, date):
-    """Locate existing row matching (Prospect Company, Meeting Date), case-insensitive.
+# Company-name suffixes stripped before matching, so "Truckers Insurance Associates"
+# matches "Truckers Insurance" and "SiriusPoint" matches "Sirius Point".
+_COMPANY_SUFFIXES = (
+    ' associates', ' companies', ' holdings limited', ' holdings',
+    ' insurance group', ' insurance services', ' insurance company', ' insurance',
+    ' group', ' corp', ' corporation', ' inc', ' llc', ' ltd', ' limited',
+    ' co', ' company',
+)
+
+
+def _norm_company(name):
+    s = (name or '').strip().lower().rstrip('.').rstrip(',').strip()
+    # Strip trailing suffixes iteratively so "Truckers Insurance Associates"
+    # and "Truckers Insurance" both collapse to "truckers"
+    changed = True
+    while changed:
+        changed = False
+        for suf in _COMPANY_SUFFIXES:
+            if s.endswith(suf):
+                s = s[: -len(suf)].strip()
+                changed = True
+                break
+    # Drop all whitespace + punctuation for final compare ("Sirius Point" == "SiriusPoint")
+    return ''.join(ch for ch in s if ch.isalnum())
+
+
+def _find_row(rows, company, date, contact_name=None):
+    """Locate existing row matching (Prospect Company, Meeting Date).
+    Company is normalized (case/space/suffix-insensitive); date is strict.
+    If multiple rows match (multi-contact meeting), require contact_name to match too.
 
     rows: list of row lists (1-indexed in sheet; rows[0] is header).
     Returns 1-based row number in sheet, or None.
@@ -247,17 +275,28 @@ def _find_row(rows, company, date):
         return None
     co_col = _headers.get('Prospect Company')
     dt_col = _headers.get('Meeting Date')
+    name_col = _headers.get('Prospect Name')
     if not (co_col and dt_col):
         return None
-    target_co = company.strip().lower()
+    target_co = _norm_company(company)
     target_dt = date.strip()
-    for i in range(1, len(rows)):  # skip header at index 0
+    target_name = (contact_name or '').strip().lower()
+    matches = []
+    for i in range(1, len(rows)):
         row = rows[i]
         if len(row) < max(co_col, dt_col):
             continue
-        if row[co_col - 1].strip().lower() == target_co and row[dt_col - 1].strip() == target_dt:
-            return i + 1  # 1-based sheet row
-    return None
+        if _norm_company(row[co_col - 1]) == target_co and row[dt_col - 1].strip() == target_dt:
+            matches.append(i + 1)
+    if len(matches) <= 1:
+        return matches[0] if matches else None
+    # Multiple rows at same (company, date): disambiguate by contact name
+    if target_name and name_col:
+        for row_num in matches:
+            existing_name = rows[row_num - 1][name_col - 1].strip().lower()
+            if existing_name == target_name:
+                return row_num
+    return None  # multiple matches but no name disambiguation → append a new row
 
 
 def upsert_meeting_row(payload):
@@ -280,7 +319,8 @@ def upsert_meeting_row(payload):
         log.exception('sheet_sync read failed')
         return {'action': 'error', 'error': str(e)}
 
-    existing_row = _find_row(rows, payload['Prospect Company'], payload['Meeting Date'])
+    existing_row = _find_row(rows, payload['Prospect Company'], payload['Meeting Date'],
+                              contact_name=payload.get('Prospect Name'))
 
     # Build the value list in column order from the sheet's actual headers
     header_row = rows[0] if rows else []
