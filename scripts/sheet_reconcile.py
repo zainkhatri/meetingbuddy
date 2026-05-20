@@ -105,7 +105,12 @@ def main():
         p = m.get('properties') or {}
         if (p.get('hs_meeting_outcome') or '') in ('CANCELED', 'NO_SHOW'):
             continue
-        contact, company = get_meeting_associations(mid)
+        try:
+            contact, company = get_meeting_associations(mid)
+        except Exception as e:
+            print(f'[skip] meeting={mid} assoc lookup failed: {e}')
+            counts['error'] += 1
+            continue
         if not company or not company.get('name'):
             continue
         payload = sheet_sync.build_payload(

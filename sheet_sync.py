@@ -44,6 +44,8 @@ CONFERENCE_DISPLAY = {
     'nashville_dinner': 'Nashville Dinner',
     'ny_dinner': 'New York Dinner',
     'insurance_insider': 'Insurance Insider 2026',
+    'reuters_es': 'Reuters - The Insurer E&S',
+    'reuters_program_manager': 'Reuters - The Insurer Program Manager',
 }
 
 # HubSpot owner id → display name (matches values in Ellen's "Meeting Sourced By" column)
@@ -154,28 +156,54 @@ def _retry(fn, *args, **kwargs):
     raise last_exc
 
 
-def _fmt_date(ts_ms):
-    """HubSpot meeting start (ms epoch) → 'M/D' in ET."""
-    if not ts_ms:
-        return ''
+def _to_dt(value):
+    """Accept ms epoch (int/str) OR ISO string ('2026-05-04T14:00:00Z'). Returns UTC datetime or None."""
+    if value is None or value == '':
+        return None
+    s = str(value)
     try:
-        dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
-        et = dt.astimezone(timezone(timedelta(hours=-4)))  # ET (DST-naive; close enough for display)
-        return f'{et.month}/{et.day}'
+        if s.isdigit():
+            return datetime.fromtimestamp(int(s) / 1000, tz=timezone.utc)
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
     except Exception:
-        return ''
+        return None
 
 
-def _fmt_time(ts_ms):
-    """HubSpot meeting start (ms epoch) → 'H:MM AM/PM ET'."""
-    if not ts_ms:
+def _fmt_date(value):
+    """HubSpot meeting start → 'M/D' in ET."""
+    dt = _to_dt(value)
+    if not dt:
         return ''
-    try:
-        dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
-        et = dt.astimezone(timezone(timedelta(hours=-4)))
-        return et.strftime('%-I:%M %p ET')
-    except Exception:
+    et = dt.astimezone(timezone(timedelta(hours=-4)))
+    return f'{et.month}/{et.day}'
+
+
+def _fmt_time(value):
+    """HubSpot meeting start → 'H:MM AM/PM ET'."""
+    dt = _to_dt(value)
+    if not dt:
         return ''
+    et = dt.astimezone(timezone(timedelta(hours=-4)))
+    return et.strftime('%-I:%M %p ET')
+
+
+_KNOWN_CONFERENCES = set(CONFERENCE_DISPLAY.keys())
+
+# Date-based fallback for conferences the bot doesn't auto-tag yet. Used when
+# HubSpot has conference_source='other' but the meeting date matches a known event.
+# (M, D) → slug
+_DATE_FALLBACK = {
+    (5, 20): 'reuters_es',
+    (5, 21): 'reuters_program_manager',
+}
+
+
+def _infer_slug_from_date(meeting_start_ms):
+    dt = _to_dt(meeting_start_ms)
+    if not dt:
+        return None
+    et = dt.astimezone(timezone(timedelta(hours=-4)))
+    return _DATE_FALLBACK.get((et.month, et.day))
 
 
 def build_payload(*, conference_slug, sourced_by_owner_id, meeting_start_ms,
@@ -187,8 +215,12 @@ def build_payload(*, conference_slug, sourced_by_owner_id, meeting_start_ms,
     Caller is responsible for only invoking this when conference_slug is non-empty.
     """
     name = ' '.join(filter(None, [(contact_first or '').strip(), (contact_last or '').strip()]))
+    # Unknown/"other" conference: try inferring from the meeting date
+    if conference_slug not in _KNOWN_CONFERENCES:
+        conference_slug = _infer_slug_from_date(meeting_start_ms)
+    display = CONFERENCE_DISPLAY.get(conference_slug, '') if conference_slug in _KNOWN_CONFERENCES else ''
     return {
-        'Conference': CONFERENCE_DISPLAY.get(conference_slug, conference_slug or ''),
+        'Conference': display,
         'Meeting Sourced By': OWNER_DISPLAY.get(str(sourced_by_owner_id or ''), ''),
         'Account Executive': '',
         'FurtherAI Rep in Meeting': '',
