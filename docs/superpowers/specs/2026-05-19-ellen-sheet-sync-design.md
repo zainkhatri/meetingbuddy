@@ -113,7 +113,7 @@ Preservation rule: when updating an existing row, never overwrite a non-empty ce
 New env vars (Railway):
 - `GOOGLE_SERVICE_ACCOUNT_JSON` — raw JSON of a service account with Sheets API enabled
 - `ELLEN_SHEET_ID` — `1dpp57GTua_cirRynJOQKtkjFzc4tJihoSjIwK9PWuqs`
-- `ELLEN_TAB_NAME` — exact tab name (TBD by inspection; likely "BDR Meeting Tracker" or similar)
+- `ELLEN_TAB_NAME` — `Full Meeting Tracker`
 
 Setup steps:
 1. Create GCP service account, enable Sheets API, generate JSON key.
