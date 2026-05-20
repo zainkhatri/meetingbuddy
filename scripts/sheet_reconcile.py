@@ -29,10 +29,10 @@ def apollo_enrich(first, last, company, email=None):
         return {}
     if not (email or (first and last and company)):
         return {}
-    body = {
-        'reveal_personal_emails': True,
-        'reveal_phone_number': True,
-    }
+    # reveal_phone_number requires async webhook + Apollo CRM contact; we only
+    # do synchronous email enrichment here. Phone enrichment lives in
+    # conference_buddy's fill_phones_sync.py for now.
+    body = {'reveal_personal_emails': True}
     if email: body['email'] = email
     if first: body['first_name'] = first
     if last: body['last_name'] = last
