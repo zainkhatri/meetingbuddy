@@ -748,7 +748,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
 # after 24h.
 _retry_queue = []  # list of {'meeting_id', 'props', 'first_seen', 'attempts'}
 _retry_lock = threading.Lock()
-RETRY_TTL_SEC = 24 * 3600
+RETRY_TTL_SEC = 7 * 24 * 3600
 
 def enqueue_retry(meeting_id, props):
     if not meeting_id or not props:
