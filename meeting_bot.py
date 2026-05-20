@@ -33,6 +33,8 @@ import anthropic
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+import sheet_sync
+
 
 # --- Credentials (all from env; fail fast if missing) ---
 SLACK_BOT_TOKEN = os.environ['SLACK_BOT_TOKEN']
@@ -500,6 +502,45 @@ def handle_message(event, client, say, logger):
         _process_booking(parsed, text, owner_id, ts, client, say)
 
 
+def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_time_utc,
+                          existing_start_ms, company_name, first, last, title, email, outcome):
+    """Best-effort upsert into Ellen's Full Meeting Tracker. Returns suffix for Slack reply."""
+    if not conference_slug or not company_name:
+        return ''
+    # Compute start time ms: prefer the one already on the existing meeting; else
+    # build from parsed date/time the same way hs_create_meeting does.
+    start_ms = existing_start_ms
+    if not start_ms and meeting_date:
+        try:
+            if meeting_time_utc:
+                dt = datetime.fromisoformat(f'{meeting_date}T{meeting_time_utc}:00+00:00')
+            else:
+                dt = datetime.fromisoformat(f'{meeting_date}T14:00:00+00:00')
+            start_ms = int(dt.timestamp() * 1000)
+        except Exception:
+            start_ms = None
+    try:
+        payload = sheet_sync.build_payload(
+            conference_slug=conference_slug,
+            sourced_by_owner_id=owner_id,
+            meeting_start_ms=start_ms,
+            company=company_name,
+            contact_first=first,
+            contact_last=last,
+            contact_title=title,
+            contact_email=email,
+            hs_meeting_outcome=outcome,
+        )
+        result = sheet_sync.upsert_meeting_row(payload)
+        action = result.get('action')
+        if action in ('inserted', 'updated'):
+            return f" + sheet ({action})"
+        return ''
+    except Exception:
+        print('[sheet_sync] unexpected error', flush=True)
+        return ''
+
+
 def _process_booking(parsed, text, owner_id, ts, client, say):
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
@@ -596,11 +637,24 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
             return
         # Enqueue for re-patching in case GCal re-syncs and clobbers booked_at
         enqueue_retry(existing['id'], update_props)
+        # Push to Ellen's sheet (best-effort)
+        sheet_result = _push_to_ellen_sheet(
+            conference_slug=conf,
+            owner_id=owner_id,
+            meeting_date=date_str,
+            meeting_time_utc=parsed.get('meeting_time_utc'),
+            existing_start_ms=existing.get('start_time_ms'),
+            company_name=company_name,
+            first=first, last=last,
+            title=parsed.get('contact_title'),
+            email=email,
+            outcome='SCHEDULED',
+        )
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{existing['id']}"
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
-        say(text=f"✓ {action} (was {prev or 'untagged'})\n{mtg_url}", thread_ts=ts)
+        say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}\n{mtg_url}", thread_ts=ts)
         return
 
     # 4. Create meeting
@@ -652,7 +706,23 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         if parsed.get('conference_source'): full_props['conference_source'] = parsed['conference_source']
         enqueue_retry(mtg['id'], full_props)
 
-    # 5. Reply
+    # 5. Push to Ellen's sheet (best-effort)
+    sheet_result = ''
+    if mtg and mtg.get('id'):
+        sheet_result = _push_to_ellen_sheet(
+            conference_slug=parsed.get('conference_source'),
+            owner_id=owner_id,
+            meeting_date=parsed.get('meeting_date'),
+            meeting_time_utc=parsed.get('meeting_time_utc'),
+            existing_start_ms=None,
+            company_name=company_name,
+            first=first, last=last,
+            title=parsed.get('contact_title'),
+            email=email,
+            outcome='SCHEDULED',
+        )
+
+    # 6. Reply
     if mtg and mtg.get('id'):
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{mtg['id']}"
@@ -662,7 +732,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         if parsed.get('conference_source'): pieces.append(f"@ {parsed['conference_source']}")
         tag = ' · '.join(pieces) if pieces else 'meeting'
         confirmation = (
-            f"✓ Logged {tag}\n"
+            f"✓ Logged {tag}{sheet_result}\n"
             f"Contact: {first or ''} {last or ''} ({parsed.get('contact_title') or '—'}) @ {company_name or '—'}\n"
             f"{mtg_url}"
         )

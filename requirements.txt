@@ -2,3 +2,5 @@ anthropic>=0.40.0
 slack_bolt>=1.18.0
 slack_sdk>=3.27.0
 requests>=2.31.0
+gspread>=6.0.0
+google-auth>=2.0.0
