@@ -19,6 +19,54 @@ import time
 
 import requests
 
+APOLLO_API_KEY = os.environ.get('APOLLO_API_KEY')
+
+
+def apollo_enrich(first, last, company, email=None):
+    """Look up contact in Apollo. Returns {'email': str|None, 'phone': str|None}.
+    Returns empty dict on miss or any error (best-effort enrichment)."""
+    if not APOLLO_API_KEY:
+        return {}
+    if not (email or (first and last and company)):
+        return {}
+    body = {
+        'reveal_personal_emails': True,
+        'reveal_phone_number': True,
+    }
+    if email: body['email'] = email
+    if first: body['first_name'] = first
+    if last: body['last_name'] = last
+    if company: body['organization_name'] = company
+    try:
+        r = requests.post('https://api.apollo.io/v1/people/match',
+                          headers={'Content-Type': 'application/json', 'X-Api-Key': APOLLO_API_KEY},
+                          json=body, timeout=15)
+        if not r.ok:
+            return {}
+        person = (r.json() or {}).get('person') or {}
+    except Exception:
+        return {}
+    out = {}
+    em = person.get('email') or (person.get('contact') or {}).get('email')
+    if em and '@' in em and 'email_not_unlocked' not in em.lower():
+        out['email'] = em
+    phones = []
+    if isinstance(person.get('phone_numbers'), list):
+        phones += person['phone_numbers']
+    contact = person.get('contact') if isinstance(person.get('contact'), dict) else None
+    if contact and isinstance(contact.get('phone_numbers'), list):
+        phones += contact['phone_numbers']
+    type_rank = {'work_direct': 0, 'work': 1, 'hq': 2, 'mobile': 3, 'home': 4}
+    phones.sort(key=lambda x: type_rank.get((x.get('type') or '').lower(), 9))
+    seen, ordered = set(), []
+    for p in phones:
+        s = (p.get('sanitized_number') or p.get('raw_number') or '').strip()
+        if s and s not in seen:
+            seen.add(s); ordered.append(s)
+    if ordered:
+        out['phone'] = ordered[0]  # prefer the most direct number
+    return out
+
 # Allow `import sheet_sync` regardless of CWD
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sheet_sync
@@ -136,17 +184,34 @@ def main():
             continue
         if not company or not company.get('name'):
             continue
+        c = contact or {}
+        first = c.get('firstname'); last = c.get('lastname')
+        email = c.get('email'); title = c.get('jobtitle')
+        co_name = company.get('name')
+        # Apollo enrichment: fill missing email + grab phone for Notes
+        apollo_phone = ''
+        if not email and (first and last and co_name):
+            data = apollo_enrich(first, last, co_name, None)
+            if data.get('email'): email = data['email']
+            if data.get('phone'): apollo_phone = data['phone']
+        elif email and APOLLO_API_KEY:
+            # We have email; still grab phone via Apollo match for richer rows
+            data = apollo_enrich(first, last, co_name, email)
+            if data.get('phone'): apollo_phone = data['phone']
+
         payload = sheet_sync.build_payload(
             conference_slug=p.get('conference_source'),
             sourced_by_owner_id=p.get('meeting_sourced_by') or p.get('hubspot_owner_id'),
             meeting_start_ms=p.get('hs_meeting_start_time'),
-            company=company.get('name'),
-            contact_first=(contact or {}).get('firstname'),
-            contact_last=(contact or {}).get('lastname'),
-            contact_title=(contact or {}).get('jobtitle'),
-            contact_email=(contact or {}).get('email'),
+            company=co_name,
+            contact_first=first,
+            contact_last=last,
+            contact_title=title,
+            contact_email=email,
             hs_meeting_outcome=p.get('hs_meeting_outcome') or 'SCHEDULED',
         )
+        if apollo_phone:
+            payload['Notes'] = f'Phone: {apollo_phone}'
         if args.dry_run:
             print(f'[dry] {payload["Conference"]} | {payload["Prospect Company"]} | {payload["Meeting Date"]} | {payload["Prospect Name"]}')
             counts['skipped'] += 1
