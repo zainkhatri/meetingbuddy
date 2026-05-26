@@ -1055,13 +1055,22 @@ def reconcile_duplicates():
                 comp_b = _norm_company(p_b.get('hs_meeting_title'))
                 if not comp_b: continue
                 if _edit_distance(comp_a, comp_b, cap=2) > 2: continue
-                # Winner: the one WITHOUT a [bracket] tag in title (= GCal copy)
-                has_bracket_a = '[' in (p_a.get('hs_meeting_title') or '')
-                has_bracket_b = '[' in (p_b.get('hs_meeting_title') or '')
-                if has_bracket_a and not has_bracket_b:
+                # Winner selection:
+                # 1. If exactly one side has booked_at, that side WINS (never delete a BDR-tagged meeting).
+                # 2. Otherwise prefer the one WITHOUT a [bracket] tag in title (= GCal copy).
+                booked_a = bool(p_a.get('booked_at'))
+                booked_b = bool(p_b.get('booked_at'))
+                if booked_a and not booked_b:
+                    winner, loser, wp, lp = m_a, m_b, p_a, p_b
+                elif booked_b and not booked_a:
                     winner, loser, wp, lp = m_b, m_a, p_b, p_a
                 else:
-                    winner, loser, wp, lp = m_a, m_b, p_a, p_b
+                    has_bracket_a = '[' in (p_a.get('hs_meeting_title') or '')
+                    has_bracket_b = '[' in (p_b.get('hs_meeting_title') or '')
+                    if has_bracket_a and not has_bracket_b:
+                        winner, loser, wp, lp = m_b, m_a, p_b, p_a
+                    else:
+                        winner, loser, wp, lp = m_a, m_b, p_a, p_b
                 # Copy missing fields from loser
                 merge = {}
                 for k in ('booked_at', 'meeting_sourced_by', 'meeting_source_channel',
