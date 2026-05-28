@@ -974,22 +974,45 @@ def reconcile_duplicates():
             continue
         by_key.setdefault((oid, start_dt.date().isoformat()), []).append((m, start_dt, p))
 
+    def _norm_company(title):
+        if not title: return ''
+        t = re.sub(r'^FurtherAI\s*\+\s*', '', title)
+        t = re.sub(r'\s*\[[^\]]*\]\s*', '', t)
+        t = re.sub(r'\s*\([^)]*\)\s*', '', t)
+        return re.sub(r'[^a-z0-9]', '', t.lower())
+
     merged = 0
     for items in by_key.values():
         if len(items) < 2:
             continue
-        # Find bot-created (has booked_at + title prefix) and GCal twin (no booked_at, ±2h)
+        # Find bot-created (has booked_at + title prefix) and GCal twin (no booked_at, ±2h).
+        # Safety: require the bot's company name to appear in the GCal title — without this,
+        # an unrelated GCal meeting at a nearby time on the same day would absorb the bot's
+        # booked_at/sourced_by tags and the bot record would be deleted (we saw this destroy
+        # a Daiichi booking by merging it into an unrelated Berkshire meeting).
+        consumed = set()
         for bot_m, bot_dt, bot_p in items:
+            if bot_m['id'] in consumed:
+                continue
             if not bot_p.get('booked_at'):
                 continue
             if not (bot_p.get('hs_meeting_title') or '').startswith('FurtherAI + '):
                 continue
+            bot_company_norm = _norm_company(bot_p.get('hs_meeting_title'))
             for gcal_m, gcal_dt, gcal_p in items:
                 if gcal_m['id'] == bot_m['id']:
+                    continue
+                if gcal_m['id'] in consumed:
                     continue
                 if gcal_p.get('booked_at'):
                     continue
                 if abs((bot_dt - gcal_dt).total_seconds()) > 7200:
+                    continue
+                gcal_title_norm = re.sub(r'[^a-z0-9]', '',
+                                          (gcal_p.get('hs_meeting_title') or '').lower())
+                if not bot_company_norm or not gcal_title_norm:
+                    continue
+                if bot_company_norm not in gcal_title_norm and gcal_title_norm not in bot_company_norm:
                     continue
                 # Merge bot metadata onto GCal copy
                 merge_props = {}
@@ -1008,6 +1031,11 @@ def reconcile_duplicates():
                                 headers=HS, timeout=30)
                 print(f'[reconcile] merged {bot_m["id"]} → {gcal_m["id"]}, deleted dup')
                 merged += 1
+                consumed.add(bot_m['id'])
+                consumed.add(gcal_m['id'])
+                # Refresh in-memory props so a later iteration sees the new state
+                for k, v in merge_props.items():
+                    gcal_p[k] = v
                 break
 
     # Second pass: same owner + same exact start_time, fuzzy-similar company name.
@@ -1015,13 +1043,6 @@ def reconcile_duplicates():
     # meeting (e.g. spelling diff: "Franklin Maddison" vs "Franklin Madison")
     # so it created a parallel record. Both end up with booked_at set, which the
     # first pass skips. Here we pair by exact start-time + name similarity.
-    def _norm_company(title):
-        if not title: return ''
-        # Strip "FurtherAI + " prefix, "[conf]" brackets, "(conf)" parens
-        t = re.sub(r'^FurtherAI\s*\+\s*', '', title)
-        t = re.sub(r'\s*\[[^\]]*\]\s*', '', t)
-        t = re.sub(r'\s*\([^)]*\)\s*', '', t)
-        return re.sub(r'[^a-z0-9]', '', t.lower())
     def _edit_distance(a, b, cap=3):
         # Bail out early if length diff > cap
         if abs(len(a) - len(b)) > cap: return cap + 1
