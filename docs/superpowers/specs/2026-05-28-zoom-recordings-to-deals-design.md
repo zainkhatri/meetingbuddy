@@ -30,7 +30,6 @@ No automatic deal-stage or field changes — logging only.
 - No webhook / real-time path (polling is sufficient).
 - No deal-stage automation.
 - No Slack notification for unmatched calls (log only — see below).
-- No backfill of historical recordings in v1 (only recordings completed after go-live).
 
 ## Architecture
 
@@ -78,6 +77,20 @@ A small persistent volume mounted on the bot service holds `zoom_state.json`:
 - Keeps the Zoom secret **out of the CRM** (rejected HubSpot-as-store for hygiene).
 - `processed_recording_uuids` gives idempotency — same pattern as
   `scheduled_deal_sync.py`'s `processed_meeting_ids`.
+
+## Backfill (one-time, last 30 days)
+
+Before the live loop takes over, run a one-time backfill over the **last 30 days** of
+recordings:
+
+- Same code path as the loop: `list_recent_recordings(from=now-30d)`, match each to a deal,
+  write the Note, mark UUID processed.
+- Run via `zoom_sync.py --backfill-days 30` (or equivalent flag) so it's a deliberate,
+  one-off invocation, not part of the recurring loop.
+- Idempotency via `processed_recording_uuids` ensures the live loop won't re-post anything
+  the backfill already handled.
+- Expect a higher unmatched/skipped rate on older calls (closed/moved deals, changed
+  contacts); those just get logged. Anything aged past Zoom's retention window is gone.
 
 ## Matching (hybrid, in priority order)
 
