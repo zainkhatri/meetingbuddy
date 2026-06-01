@@ -57,6 +57,16 @@ OWNER_DISPLAY = {
     '92184259': 'Matt',
 }
 
+
+def bdr_sdr_owner_value(owner_id):
+    """Map a HubSpot owner id to the `sdr_owner` enum display value.
+
+    Returns '' for non-BDR owners or blank input, so callers can safely skip
+    writing the property. The roster is OWNER_DISPLAY (the same map used for the
+    sheet's 'Meeting Sourced By' column), so BDRs are defined in exactly one place.
+    """
+    return OWNER_DISPLAY.get(str(owner_id or ''), '')
+
 # Sheet column headers, in expected order. Header row is read at runtime,
 # so reordering in the sheet is fine — these are the names we look for.
 SHEET_COLUMNS = [
