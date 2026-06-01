@@ -286,26 +286,69 @@ def _company_date_matches(rows, company, date):
     return matches
 
 
-def _find_row(rows, company, date, contact_name=None):
-    """Locate existing row matching (Prospect Company, Meeting Date).
-    Company is normalized (case/space/suffix-insensitive); date is strict.
-    If multiple rows match (multi-contact meeting), require contact_name to match too.
+def _find_row(rows, company, date, contact_name=None, meeting_time=None):
+    """Locate the existing row for this meeting.
+
+    Primary match: (Prospect Company, Meeting Date) — company normalized
+    (case/space/suffix-insensitive), date strict. If several rows share that
+    (company, date) (multi-contact meeting), disambiguate by contact name.
+
+    Fallback match: (Prospect Name, Meeting Date) when the primary finds
+    nothing. The SAME prospect on the SAME date is the same meeting even if the
+    company string differs between syncs (e.g. 'Ironshore Insurance' vs
+    'Liberty Mutual', 'Allied American USA' vs 'Allied American') — without this
+    the bot appends a near-duplicate. A time guard keeps two genuinely separate
+    same-day meetings for one person apart: we only treat it as the same row
+    when the times match or either side's time is blank.
 
     rows: list of row lists (1-indexed in sheet; rows[0] is header).
     Returns 1-based row number in sheet, or None.
     """
-    matches = _company_date_matches(rows, company, date)
-    if len(matches) <= 1:
-        return matches[0] if matches else None
-    # Multiple rows at same (company, date): disambiguate by contact name
     name_col = _headers.get('Prospect Name')
+    tm_col = _headers.get('Meeting Time')
     target_name = (contact_name or '').strip().lower()
+    target_tm = (meeting_time or '').strip().lower()
+
+    def _time_ok(row):
+        # Same meeting unless both times are present and differ.
+        if not (tm_col and target_tm and len(row) >= tm_col):
+            return True
+        existing_tm = row[tm_col - 1].strip().lower()
+        return (not existing_tm) or existing_tm == target_tm
+
+    matches = _company_date_matches(rows, company, date)
+    # A lone (company, date) match is almost certainly the same meeting — return
+    # it time-agnostically, so a human reformatting the time cell can't make the
+    # daily reconcile append a duplicate.
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        # Several rows share (company, date): pick the one whose name AND time
+        # agree, so the reconcile lands on the right slot instead of the first.
+        if target_name and name_col:
+            for row_num in matches:
+                row = rows[row_num - 1]
+                if row[name_col - 1].strip().lower() == target_name and _time_ok(row):
+                    return row_num
+        # no name/time-compatible pick → fall through to name+date fallback
+
+    # Fallback: same prospect name + same date (company string may differ).
     if target_name and name_col:
-        for row_num in matches:
-            existing_name = rows[row_num - 1][name_col - 1].strip().lower()
-            if existing_name == target_name:
-                return row_num
-    return None  # multiple matches but no name disambiguation → append a new row
+        dt_col = _headers.get('Meeting Date')
+        target_dt = (date or '').strip()
+        if dt_col:
+            for i in range(1, len(rows)):
+                row = rows[i]
+                if len(row) < max(name_col, dt_col):
+                    continue
+                if row[name_col - 1].strip().lower() != target_name:
+                    continue
+                if row[dt_col - 1].strip() != target_dt:
+                    continue
+                if not _time_ok(row):  # differing non-blank times = different meeting
+                    continue
+                return i + 1
+    return None  # genuinely new meeting → append
 
 
 def upsert_meeting_row(payload):
@@ -329,7 +372,8 @@ def upsert_meeting_row(payload):
         return {'action': 'error', 'error': str(e)}
 
     existing_row = _find_row(rows, payload['Prospect Company'], payload['Meeting Date'],
-                              contact_name=payload.get('Prospect Name'))
+                              contact_name=payload.get('Prospect Name'),
+                              meeting_time=payload.get('Meeting Time'))
 
     # Guard against flooding: a payload with no Prospect Name can never match a
     # specific row when several share the same (company, date), so _find_row
