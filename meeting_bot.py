@@ -1149,22 +1149,48 @@ def reconcile_loop():
 
 
 def sheet_reconcile_loop():
-    """Run scripts/sheet_reconcile.py once a day (24h), backfilling Apollo
-    enrichment for any meeting the inline write missed phones/emails on.
-    Sleeps 60s on boot to let everything else settle first."""
+    """Run scripts/sheet_reconcile.py at most ONCE per UTC day, backfilling
+    Apollo enrichment for any meeting the inline write missed phones/emails on.
+
+    CRITICAL: periodic_restart() exits the process every 30 min, so a plain
+    `time.sleep(24*3600)` never survives to fire — the reconcile would re-run
+    on every boot (~48x/day), re-scanning 14 days of meetings each time and
+    flooding Ellen's sheet with writes + duplicate appends. We gate on a
+    date-stamped marker file that persists across the in-process restarts
+    (same container fs); a real redeploy wipes it and we run once more, which
+    is harmless. Sleeps 60s on boot to let everything else settle first."""
     import subprocess
+    from datetime import datetime, timezone
     time.sleep(60)
+    marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.last_sheet_reconcile')
     while True:
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        last = ''
         try:
-            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'sheet_reconcile.py')
-            r = subprocess.run(['python3', script, '--since', '14'], capture_output=True, timeout=900)
-            print(f'[sheet-reconcile] exit={r.returncode}')
-            for line in (r.stdout.decode('utf-8', 'replace').splitlines()[-5:]
-                         + r.stderr.decode('utf-8', 'replace').splitlines()[-3:]):
-                print(f'[sheet-reconcile] {line}')
-        except Exception as e:
-            print(f'[sheet-reconcile] error: {e}')
-        time.sleep(24 * 3600)
+            if os.path.exists(marker):
+                with open(marker) as f:
+                    last = f.read().strip()
+        except Exception:
+            pass
+        if last == today:
+            print(f'[sheet-reconcile] already ran on {today} — skipping (restart-safe)')
+        else:
+            try:
+                script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'sheet_reconcile.py')
+                r = subprocess.run(['python3', script, '--since', '14'], capture_output=True, timeout=900)
+                print(f'[sheet-reconcile] exit={r.returncode}')
+                for line in (r.stdout.decode('utf-8', 'replace').splitlines()[-5:]
+                             + r.stderr.decode('utf-8', 'replace').splitlines()[-3:]):
+                    print(f'[sheet-reconcile] {line}')
+                # Only stamp the marker on a clean run, so a crash retries next loop.
+                if r.returncode == 0:
+                    with open(marker, 'w') as f:
+                        f.write(today)
+            except Exception as e:
+                print(f'[sheet-reconcile] error: {e}')
+        # Re-check hourly. With periodic_restart this loop rarely lives an hour,
+        # but the marker makes every boot a no-op until the UTC day rolls over.
+        time.sleep(3600)
 
 
 def live_sweep_loop():

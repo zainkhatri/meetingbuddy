@@ -263,6 +263,27 @@ def _norm_company(name):
     return ''.join(ch for ch in s if ch.isalnum())
 
 
+def _company_date_matches(rows, company, date):
+    """All 1-based sheet row numbers matching (Prospect Company, Meeting Date).
+    Company is normalized (case/space/suffix-insensitive); date is strict."""
+    if not (company and date and _headers):
+        return []
+    co_col = _headers.get('Prospect Company')
+    dt_col = _headers.get('Meeting Date')
+    if not (co_col and dt_col):
+        return []
+    target_co = _norm_company(company)
+    target_dt = date.strip()
+    matches = []
+    for i in range(1, len(rows)):
+        row = rows[i]
+        if len(row) < max(co_col, dt_col):
+            continue
+        if _norm_company(row[co_col - 1]) == target_co and row[dt_col - 1].strip() == target_dt:
+            matches.append(i + 1)
+    return matches
+
+
 def _find_row(rows, company, date, contact_name=None):
     """Locate existing row matching (Prospect Company, Meeting Date).
     Company is normalized (case/space/suffix-insensitive); date is strict.
@@ -271,26 +292,12 @@ def _find_row(rows, company, date, contact_name=None):
     rows: list of row lists (1-indexed in sheet; rows[0] is header).
     Returns 1-based row number in sheet, or None.
     """
-    if not (company and date and _headers):
-        return None
-    co_col = _headers.get('Prospect Company')
-    dt_col = _headers.get('Meeting Date')
-    name_col = _headers.get('Prospect Name')
-    if not (co_col and dt_col):
-        return None
-    target_co = _norm_company(company)
-    target_dt = date.strip()
-    target_name = (contact_name or '').strip().lower()
-    matches = []
-    for i in range(1, len(rows)):
-        row = rows[i]
-        if len(row) < max(co_col, dt_col):
-            continue
-        if _norm_company(row[co_col - 1]) == target_co and row[dt_col - 1].strip() == target_dt:
-            matches.append(i + 1)
+    matches = _company_date_matches(rows, company, date)
     if len(matches) <= 1:
         return matches[0] if matches else None
     # Multiple rows at same (company, date): disambiguate by contact name
+    name_col = _headers.get('Prospect Name')
+    target_name = (contact_name or '').strip().lower()
     if target_name and name_col:
         for row_num in matches:
             existing_name = rows[row_num - 1][name_col - 1].strip().lower()
@@ -322,13 +329,28 @@ def upsert_meeting_row(payload):
     existing_row = _find_row(rows, payload['Prospect Company'], payload['Meeting Date'],
                               contact_name=payload.get('Prospect Name'))
 
+    # Guard against flooding: a payload with no Prospect Name can never match a
+    # specific row when several share the same (company, date), so _find_row
+    # returns None and we'd append a fresh blank-name row on every reconcile.
+    # If that (company, date) is already represented, the contactless row adds
+    # nothing — skip it rather than pile up duplicates.
+    if existing_row is None and not (payload.get('Prospect Name') or '').strip():
+        if _company_date_matches(rows, payload['Prospect Company'], payload['Meeting Date']):
+            return {'action': 'skipped', 'reason': 'contactless duplicate of existing company/date'}
+
     # Build the value list in column order from the sheet's actual headers
     header_row = rows[0] if rows else []
     new_values = [payload.get(h.strip(), '') for h in header_row]
 
     if existing_row is None:
         try:
-            _retry(ws.append_row, new_values, value_input_option='USER_ENTERED')
+            # table_range='A1' is REQUIRED: without it gspread lets the Sheets
+            # API auto-detect the table, which intermittently starts the append
+            # at a non-A column (observed: column E, a +4 shift). Shifted rows
+            # land company/name/date in the wrong columns, so _find_row can
+            # never match them again and every reconcile re-appends a fresh
+            # copy — the unbounded flood. Pinning to A1 forces column-A writes.
+            _retry(ws.append_row, new_values, value_input_option='USER_ENTERED', table_range='A1')
             return {'action': 'inserted', 'row': len(rows) + 1}
         except Exception as e:
             log.exception('sheet_sync append failed')
