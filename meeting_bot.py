@@ -49,14 +49,18 @@ SLACK_USER_TO_HS_OWNER = {
     # Real-time bot will auto-populate on first message from a user.
 }
 # Fallback by display-name substring (case-insensitive)
-# REAL BDR roster: Zain, Jacob, Dani only. Everyone else (Aman, Bobby, Mike,
-# Nia, Gavin, Kush, Logan, etc.) is an AE/rep/teammate — they may attend or
-# react but they do NOT source meetings for the dashboard.
+# REAL BDR roster: Zain, Jacob, Dani, Ben Trotter, Matt Stapleton. Everyone
+# else (Aman, Bobby, Mike, Nia, Gavin, Kush, Logan, etc.) is an AE/rep/teammate
+# — they may attend or react but they do NOT source meetings for the dashboard.
+# Match on last names for Ben/Matt: 'ben'/'matt' are unsafe substrings
+# (benjamin/bennett, matthew), but 'trotter'/'stapleton' are unambiguous.
 NAME_TO_OWNER = {
     'zain': '88760040',
     'jacob': '162210484',
     'dani': '82377567',
     'daniella': '82377567',
+    'trotter': '164943105',   # Ben Trotter
+    'stapleton': '92184259',  # Matt Stapleton
 }
 
 # --- Claude parser ---

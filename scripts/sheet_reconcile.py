@@ -116,7 +116,8 @@ INTERNAL_EMAIL_DOMAINS = ('@furtherai.com', '@further.ai')
 
 # Real BDR roster — only meetings sourced by (or owned by) these get into Ellen's sheet.
 # Per Zain's stance: AEs / Aman / reps may attend but don't source for the BDR dashboard.
-BDR_OWNER_IDS = {'88760040', '162210484', '82377567'}  # Zain, Jacob, Dani
+BDR_OWNER_IDS = {'88760040', '162210484', '82377567',  # Zain, Jacob, Dani
+                 '164943105', '92184259'}              # Ben Trotter, Matt Stapleton
 
 
 def _is_internal(email):
