@@ -340,9 +340,17 @@ def upsert_meeting_row(payload):
         if _company_date_matches(rows, payload['Prospect Company'], payload['Meeting Date']):
             return {'action': 'skipped', 'reason': 'contactless duplicate of existing company/date'}
 
-    # Build the value list in column order from the sheet's actual headers
+    # Build the value list in column order from the sheet's actual headers.
     header_row = rows[0] if rows else []
-    new_values = [payload.get(h.strip(), '') for h in header_row]
+    # COLUMN-WIDTH CLAMP — never write past the last *named* header column.
+    # get_all_values() pads header_row to the sheet's used width, so any phantom
+    # trailing columns (e.g. a stray wide paste, or the old +4-drift bug that
+    # ratcheted this tab out to 5825 columns) would otherwise make new_values
+    # that wide and re-expand the grid on every write. Clamping to the real
+    # header extent means the bot physically cannot widen the sheet again.
+    last_col = max((i + 1 for i, h in enumerate(header_row) if h.strip()),
+                   default=len(header_row))
+    new_values = [payload.get(h.strip(), '') for h in header_row][:last_col]
 
     if existing_row is None:
         try:
@@ -363,7 +371,7 @@ def upsert_meeting_row(payload):
     current = rows[existing_row - 1] if len(rows) >= existing_row else []
     merged = []
     any_change = False
-    for i, h in enumerate(header_row):
+    for i, h in enumerate(header_row[:last_col]):  # clamped to named columns
         new_val = payload.get(h.strip(), '')
         old_val = current[i] if i < len(current) else ''
         if old_val.strip():
@@ -376,7 +384,7 @@ def upsert_meeting_row(payload):
         return {'action': 'updated', 'row': existing_row, 'noop': True}
 
     try:
-        end_col = _col_letter(len(header_row))
+        end_col = _col_letter(last_col)
         rng = f'A{existing_row}:{end_col}{existing_row}'
         _retry(ws.update, rng, [merged], value_input_option='USER_ENTERED')
         return {'action': 'updated', 'row': existing_row}
