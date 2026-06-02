@@ -205,9 +205,33 @@ def hs_create_contact(first, last, title, company_name, email=None, linkedin=Non
     if linkedin: props['hs_linkedin_url'] = linkedin
     if company_name: props['company'] = company_name
     if owner_id: props['hubspot_owner_id'] = owner_id
+    sdr_val = sheet_sync.bdr_sdr_owner_value(owner_id)
+    if sdr_val:
+        props['sdr_owner'] = sdr_val
     body = {'properties': props}
     r = requests.post('https://api.hubapi.com/crm/v3/objects/contacts', headers=HS, json=body, timeout=30)
     return r.json() if r.status_code in (200, 201) else None
+
+
+def hs_set_contact_sdr_owner(contact_id, owner_id):
+    """Fill a contact's sdr_owner with the sourcing BDR. Never overwrites a
+    non-empty value (BDR/AE-curated attribution is canonical). No-op for
+    non-BDR owners."""
+    val = sheet_sync.bdr_sdr_owner_value(owner_id)
+    if not (contact_id and val):
+        return
+    try:
+        r = requests.get(
+            f'https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}',
+            headers=HS, params={'properties': 'sdr_owner'}, timeout=15)
+        current = (r.json().get('properties') or {}).get('sdr_owner') if r.status_code == 200 else None
+        if current:
+            return  # preserve existing attribution
+        requests.patch(
+            f'https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}',
+            headers=HS, json={'properties': {'sdr_owner': val}}, timeout=15)
+    except Exception as e:
+        print(f'[sdr_owner] set failed contact={contact_id}: {e}', flush=True)
 
 
 def hs_associate_contact_company(contact_id, company_id):
@@ -589,6 +613,8 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         contact = hs_create_contact(first, last, parsed.get('contact_title'),
                                      company_name, email, parsed.get('contact_linkedin'), owner_id)
     contact_id = contact['id'] if contact else None
+    if contact_id:
+        hs_set_contact_sdr_owner(contact_id, owner_id)
 
     if contact_id and company_id:
         hs_associate_contact_company(contact_id, company_id)
