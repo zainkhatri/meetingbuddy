@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Slack → Claude → HubSpot meeting bot.
 
-Listens in #bdr-gang. When a BDR posts a booking announcement, Claude parses it
-and the bot creates/updates HubSpot records (contact, company, meeting) and
-replies in-thread with a confirmation.
+Listens in two external Slack channels — #demos-booked (real demos on the AE
+calendar, 30 min) and #conference-meetings (15-min conference touch meetings).
+The channel is the authoritative meeting-type signal. When a BDR posts a booking
+announcement, Claude parses it and the bot creates/updates HubSpot records
+(contact, company, meeting) and replies in-thread with a confirmation.
 
 Ground rules BDRs should follow (flexible — Claude handles variance):
   Meeting booked!
@@ -34,6 +36,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 import sheet_sync
+import attribution
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -42,6 +45,26 @@ SLACK_APP_TOKEN = os.environ['SLACK_APP_TOKEN']
 ANTHROPIC_API_KEY = os.environ['ANTHROPIC_API_KEY']
 HS_API_KEY = os.environ['HS_API_KEY']
 HS = {'Authorization': f'Bearer {HS_API_KEY}', 'Content-Type': 'application/json'}
+
+# Conference bookings used to auto-create a Scheduled-stage deal each. That
+# clutters the Scheduled board with deals that never advance after the meeting
+# passes (Zain, 2026-06-12). OFF by default; set CREATE_CONFERENCE_DEALS=1 to
+# re-enable. Slack booking confirmations + attribution are unaffected either way.
+CREATE_CONFERENCE_DEALS = os.environ.get('CREATE_CONFERENCE_DEALS', '0') == '1'
+
+# --- Channel-driven meeting type (the channel is the authoritative signal) ---
+# Two external Slack channels feed the bot, each meaning a different thing:
+#   demos-booked       -> real demos on the AE's calendar (GCal-synced); 30 min.
+#   conference-meetings-> 15-min conference touch meetings; tag as 'conference'.
+# The Slack channel decides meeting_type/duration; the post text still decides
+# source_channel (email/linkedin/...) and conference_source. This replaces
+# guessing the type from header tags like "DEMO" vs "TARGET MARKETS MEETING".
+DEMOS_BOOKED_CHANNEL = 'C0AJL106QJJ'
+CONFERENCE_MEETINGS_CHANNEL = 'C0B9Z8562RL'
+CHANNEL_PROFILE = {
+    DEMOS_BOOKED_CHANNEL:        {'meeting_type': 'demo',       'is_conference': False, 'duration_min': 30},
+    CONFERENCE_MEETINGS_CHANNEL: {'meeting_type': 'conference', 'is_conference': True,  'duration_min': 15},
+}
 
 # --- Slack user → HubSpot owner mapping ---
 SLACK_USER_TO_HS_OWNER = {
@@ -169,21 +192,13 @@ def parse_with_claude(text, reference_date=None):
 
 
 # --- HubSpot helpers ---
-def hs_find_contact(first, last, email=None):
-    filters = []
-    if email:
-        filters = [{'propertyName': 'email', 'operator': 'EQ', 'value': email.lower()}]
-    else:
-        if first:
-            filters.append({'propertyName': 'firstname', 'operator': 'EQ', 'value': first})
-        if last:
-            filters.append({'propertyName': 'lastname', 'operator': 'EQ', 'value': last})
-    if not filters:
-        return None
-    body = {'filterGroups': [{'filters': filters}], 'properties': ['firstname', 'lastname', 'email'], 'limit': 1}
-    r = requests.post('https://api.hubapi.com/crm/v3/objects/contacts/search', headers=HS, json=body, timeout=30)
-    rs = r.json().get('results', [])
-    return rs[0] if rs else None
+def hs_find_contact(first, last, email=None, company_name=None):
+    """Collision-safe contact resolution (see attribution.find_contact).
+
+    Email wins outright; same-name collisions are disambiguated by the posted
+    company; if still ambiguous it returns None rather than guessing — guessing
+    is what stamped one BDR's meeting onto another's record."""
+    return attribution.find_contact(HS, first, last, email, company_name)
 
 
 def hs_find_company(name):
@@ -245,13 +260,15 @@ def hs_associate_contact_company(contact_id, company_id):
 
 _CONF_RULES = [
     # More-specific patterns first.
-    (r'\binsurtech\s+insights\b',         'insurtech_insights'),
+    # BDRs/GCal spell it both "InsurTech" and "InsureTech" — accept either.
+    # [\s_] also matches the bot's own bracket-slug titles ("[insurtech_insights]").
+    (r'\binsure?tech[\s_]+insights\b',    'insurtech_insights'),
     (r'\binsurance\s+innovators\b',       'insurance_innovators'),
     (r'\binsurance\s+insider\b',          'insurance_insider'),
     (r'\bwsia\s+dinner\b',                'wsia_dinner'),
     (r'\bwsia[\s_]uw[\s_]summit\b',       'wsia_uw_summit'),
     (r'\bwsia\b',                         'wsia_uw_summit'),
-    (r'\binsurtech[\s_]?ny[\s_]?(spring)?\b', 'insurtech_ny_spring'),
+    (r'\binsure?tech[\s_]?ny[\s_]?(spring)?\b', 'insurtech_ny_spring'),
     (r'\bitny\d*\b',                      'insurtech_ny_spring'),
     (r'\btmpaa\b',                        'tmpaa'),
     (r'\btmpcc\b',                        'tmpcc'),
@@ -400,20 +417,22 @@ def hs_update_meeting(meeting_id, sourced_by, mtype=None, channel=None, conf=Non
 
 
 def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting_type, source_channel,
-                     conference_source, notes, owner_id=None, company_id=None):
-    # Build start time
+                     conference_source, notes, owner_id=None, company_id=None, duration_min=30):
+    # Build start time. NEVER stamp "now" — a fabricated time is the timeless
+    # junk we're killing. Callers gate on a real date before reaching here; if
+    # one slips through with no date, refuse rather than ghost-create.
     if date_str and time_str:
         try:
             start = datetime.fromisoformat(f'{date_str}T{time_str}:00+00:00')
         except Exception:
-            start = datetime.now(timezone.utc)
+            start = datetime.fromisoformat(f'{date_str}T14:00:00+00:00')
     elif date_str:
         start = datetime.fromisoformat(f'{date_str}T14:00:00+00:00')
     else:
-        start = datetime.now(timezone.utc)
-    end = start.replace(microsecond=0)
+        print(f'[meeting] refused create — no date for {title!r}')
+        return None
     start_ms = int(start.timestamp() * 1000)
-    end_ms = start_ms + 30 * 60 * 1000
+    end_ms = start_ms + duration_min * 60 * 1000
     props = {
         'hs_timestamp': str(start_ms),
         'hs_meeting_title': title,
@@ -441,6 +460,136 @@ def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting
         body['associations'] = assocs
     r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings', headers=HS, json=body, timeout=30)
     return r.json() if r.status_code in (200, 201) else None
+
+
+# --- Deal creation: conference bookings land in the Sales Pipeline ---
+# Per Zain (2026-06-05): bot-booked CONFERENCE meetings should also create a
+# deal in the Scheduled stage, so the booking is real in pipeline reporting
+# and "how many qualified" becomes deal-stage math instead of guesswork.
+# (The AE-side scheduled_deal_sync.py cron does this for AE-owned intro
+# meetings but deliberately skips conference meetings and never sees
+# BDR-owned ones — this fills that gap at the moment of booking.)
+DEAL_PIPELINE = 'default'
+DEAL_STAGE_SCHEDULED = '3541233368'
+# An open deal in any of these stages already covers the company — never
+# create a second one. (Same list scheduled_deal_sync.py uses.)
+DEAL_OPEN_STAGES = ['3541233368', '1034884191', 'appointmentscheduled',
+                    'qualifiedtobuy', 'decisionmakerboughtin', 'contractsent']
+# Deals are ALWAYS owned by an AE, never a BDR (per Zain 2026-06-05).
+# Each BDR's bookings roll up to their AE:
+BDR_TO_AE = {
+    '88760040': '84250910',    # Zain        -> Nia
+    '164943105': '84250910',   # Ben Trotter -> Nia
+    '162210484': '163071452',  # Jacob       -> Gavin
+    '82377567': '163071452',   # Dani        -> Gavin
+    '92184259': '162894707',   # Matt        -> Mike
+}
+DQ_QUEUE_OWNER = '164069740'   # "Disqualified Queue" — never a deal owner
+AE_FALLBACK = '654909503'      # Aman — when no company AE and no BDR mapping
+# conference_source slug -> deals.lead_source_activity dropdown option.
+# Only slugs with an EXACT existing option are mapped — an unknown enum value
+# makes the whole deal-create 400. Unmapped slugs still get lead_source.
+CONF_TO_LEAD_ACTIVITY = {
+    'insurtech_insights': 'Insurtech Insights',
+    'insurance_innovators': 'Insurance Innovators',
+    'tmpaa': 'TMPAA',
+    'reuters_es': 'Reuters - The Insurer E&S',
+    'reuters_program_managers': 'Reuters - The Insurer Program Manager',
+}
+
+
+def deal_owner_for(company_owner_id, bdr_owner_id):
+    """Resolve who owns a conference deal: the company's AE when the company
+    owner is a real AE; otherwise the booking BDR's AE (BDR_TO_AE); else Aman.
+    A BDR or the Disqualified Queue is never returned."""
+    if (company_owner_id and company_owner_id not in BDR_TO_AE
+            and company_owner_id != DQ_QUEUE_OWNER):
+        return company_owner_id
+    return BDR_TO_AE.get(bdr_owner_id or '') or AE_FALLBACK
+
+
+def hs_find_open_deal(company_id, contact_id):
+    """First open Sales-Pipeline deal associated with the company (or, when
+    the company is unknown, the contact). None if there is none."""
+    for prop, oid in (('associations.company', company_id),
+                      ('associations.contact', contact_id)):
+        if not oid:
+            continue
+        body = {'filterGroups': [{'filters': [
+                    {'propertyName': prop, 'operator': 'EQ', 'value': str(oid)},
+                    {'propertyName': 'pipeline', 'operator': 'EQ', 'value': DEAL_PIPELINE},
+                    {'propertyName': 'dealstage', 'operator': 'IN', 'values': DEAL_OPEN_STAGES},
+                ]}],
+                'properties': ['dealname', 'dealstage'], 'limit': 1}
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code == 200:
+            rs = r.json().get('results', [])
+            if rs:
+                return rs[0]
+    return None
+
+
+def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
+                             contact_id, bdr_owner_id, meeting_id,
+                             conference_source=None):
+    """Create a Scheduled-stage deal for a conference booking and associate
+    meeting/contact/company. Deal owner = an AE, never a BDR (see
+    deal_owner_for); sourced_by = the booking BDR; lead_source/-activity mark
+    which conference produced it. Returns deal id or None."""
+    props = {
+        'dealname': f'{company_name} - Intro Calls',
+        'pipeline': DEAL_PIPELINE,
+        'dealstage': DEAL_STAGE_SCHEDULED,
+        'hubspot_owner_id': deal_owner_for(company_owner_id, bdr_owner_id),
+    }
+    if conference_source:
+        props['lead_source'] = 'Conference'
+        activity = CONF_TO_LEAD_ACTIVITY.get(conference_source)
+        if activity:
+            props['lead_source_activity'] = activity
+    if bdr_owner_id:
+        props['sourced_by'] = bdr_owner_id
+    r = requests.post('https://api.hubapi.com/crm/v3/objects/deals',
+                      headers=HS, json={'properties': props}, timeout=30)
+    if r.status_code not in (200, 201):
+        print(f'[deal] create failed for {company_name}: {r.status_code} {r.text[:200]}')
+        return None
+    did = r.json().get('id')
+    for obj, oid in (('meetings', meeting_id), ('contacts', contact_id),
+                     ('companies', company_id)):
+        if not oid:
+            continue
+        try:
+            requests.put(
+                f'https://api.hubapi.com/crm/v4/objects/deals/{did}/associations/default/{obj}/{oid}',
+                headers=HS, timeout=15)
+        except Exception:
+            pass
+    return did
+
+
+def ensure_conference_deal(conference_source, company_name, company_id,
+                           company_owner_id, contact_id, bdr_owner_id, meeting_id):
+    """Conference booking -> make sure an open deal exists. No-op unless the
+    booking is conference-sourced and names a company; never duplicates an
+    open deal. Returns '' or a suffix for the Slack confirmation."""
+    if not CREATE_CONFERENCE_DEALS:
+        return ''  # deal-creation gated off; Slack booking/attribution unaffected
+    if not conference_source or not company_name:
+        return ''
+    try:
+        if hs_find_open_deal(company_id, contact_id):
+            return ''  # a live deal already covers this company
+        did = hs_create_scheduled_deal(company_name, company_id, company_owner_id,
+                                       contact_id, bdr_owner_id, meeting_id,
+                                       conference_source=conference_source)
+        if did:
+            print(f'[deal] created Scheduled deal {did} for {company_name} (mtg {meeting_id})')
+            return ' + deal (Scheduled)'
+    except Exception as e:
+        print(f'[deal] ensure failed for {company_name}: {e}')
+    return ''
 
 
 # --- Slack bot ---
@@ -531,7 +680,7 @@ def handle_message(event, client, say, logger):
     except Exception as e:
         print(f'[live] reactions_add failed: {e}')
     for parsed in bookings:
-        _process_booking(parsed, text, owner_id, ts, client, say)
+        _process_booking(parsed, text, owner_id, ts, client, say, channel=channel)
 
 
 def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_time_utc,
@@ -573,11 +722,19 @@ def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_tim
         return ''
 
 
-def _process_booking(parsed, text, owner_id, ts, client, say):
+def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
     last = parsed.get('contact_last_name')
     email = parsed.get('contact_email')
+
+    # Channel is the authoritative meeting-type signal — it overrides whatever
+    # Claude guessed from the text. demos-booked -> 'demo'; conference-meetings
+    # -> 'conference'. Unknown/legacy channel -> fall back to text inference.
+    profile = CHANNEL_PROFILE.get(channel, {})
+    if profile.get('meeting_type'):
+        parsed['meeting_type'] = profile['meeting_type']
+    duration_min = profile.get('duration_min', 30)
 
     # If a conference is involved, default source_channel to "conference" when
     # Claude couldn't classify it (e.g. "Source: Brella" doesn't match the basic enum).
@@ -606,9 +763,11 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
     # 1. Find or create company
     co = hs_find_company(company_name) if company_name else None
     company_id = co['id'] if co else None
+    # Company owner = the AE; conference deals get assigned to them.
+    company_owner_id = (co.get('properties') or {}).get('hubspot_owner_id') if co else None
 
-    # 2. Find or create contact
-    contact = hs_find_contact(first, last, email)
+    # 2. Find or create contact (company disambiguates same-name collisions)
+    contact = hs_find_contact(first, last, email, company_name)
     if not contact and (first or last or email):
         contact = hs_create_contact(first, last, parsed.get('contact_title'),
                                      company_name, email, parsed.get('contact_linkedin'), owner_id)
@@ -622,6 +781,12 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
     # 3. Date-aware dedup — find the existing meeting closest to the announced date and tag it
     date_str = parsed.get('meeting_date')
     existing = hs_find_existing_meeting(contact_id, date_str) if contact_id else None
+    # Hard guard: a contact-pivot match must be for the SAME company named in the
+    # post. Protects against any residual same-name contact mismatch tagging a
+    # different company's (or another BDR's) meeting. Skip when matched by email
+    # (contact is then unambiguous) or when the post named no company.
+    if existing and company_name and not email and not attribution.title_matches_company(existing.get('title', ''), company_name):
+        existing = None
     # Fallback: GCal-synced meeting may exist before the contact is associated.
     # Search by company name + date window.
     if not existing:
@@ -684,14 +849,31 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
             email=email,
             outcome='SCHEDULED',
         )
+        # Conference booking -> make sure a Scheduled-stage deal exists
+        deal_suffix = ensure_conference_deal(conf, company_name, company_id,
+                                             company_owner_id, contact_id,
+                                             owner_id, existing['id'])
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{existing['id']}"
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
-        say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}\n{mtg_url}", thread_ts=ts)
+        say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}{deal_suffix}\n{mtg_url}", thread_ts=ts)
         return
 
-    # 4. Create meeting
+    # 4. Create meeting — but only with a real time. We reach here only when no
+    # existing (incl. GCal-synced) meeting matched. Fabricating a time is the
+    # timeless-junk we're killing, so gate on a real date first.
+    if not parsed.get('meeting_date'):
+        say(text="✓ Logged the contact/company. No meeting created yet — reply with the "
+                 "date (and time) and I'll add it.", thread_ts=ts)
+        return
+    # demos-booked is a real calendar event: require a confirmed time, or wait
+    # for the AE's calendar to sync (a later sweep will tag it). Don't ghost it.
+    if channel == DEMOS_BOOKED_CHANNEL and not parsed.get('meeting_time_utc'):
+        say(text="✓ Logged the contact/company. This is a demo (calendar event) — reply with the "
+                 "time, or once it's on the AE's calendar I'll tag it automatically.", thread_ts=ts)
+        return
+
     mtg_title = f"FurtherAI + {company_name}" if company_name else (parsed.get('notes') or 'Meeting')
     if parsed.get('meeting_type') == 'demo':
         mtg_title += ' [Demo]'
@@ -717,6 +899,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         notes=parsed.get('notes'),
         owner_id=owner_id,
         company_id=company_id,
+        duration_min=duration_min,
     )
 
     # 4. Stamp booked_at + hs_timestamp = Slack post timestamp on the new meeting.
@@ -740,7 +923,15 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         if parsed.get('conference_source'): full_props['conference_source'] = parsed['conference_source']
         enqueue_retry(mtg['id'], full_props)
 
-    # 5. Push to Ellen's sheet (best-effort)
+    # 5. Conference booking -> make sure a Scheduled-stage deal exists
+    deal_suffix = ''
+    if mtg and mtg.get('id'):
+        deal_suffix = ensure_conference_deal(parsed.get('conference_source'),
+                                             company_name, company_id,
+                                             company_owner_id, contact_id,
+                                             owner_id, mtg['id'])
+
+    # 6. Push to Ellen's sheet (best-effort)
     sheet_result = ''
     if mtg and mtg.get('id'):
         sheet_result = _push_to_ellen_sheet(
@@ -756,7 +947,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
             outcome='SCHEDULED',
         )
 
-    # 6. Reply
+    # 7. Reply
     if mtg and mtg.get('id'):
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{mtg['id']}"
@@ -766,7 +957,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say):
         if parsed.get('conference_source'): pieces.append(f"@ {parsed['conference_source']}")
         tag = ' · '.join(pieces) if pieces else 'meeting'
         confirmation = (
-            f"✓ Logged {tag}{sheet_result}\n"
+            f"✓ Logged {tag}{sheet_result}{deal_suffix}\n"
             f"Contact: {first or ''} {last or ''} ({parsed.get('contact_title') or '—'}) @ {company_name or '—'}\n"
             f"{mtg_url}"
         )
@@ -956,7 +1147,7 @@ def replay_missed_messages():
             any_ok = False
             for parsed in bookings:
                 try:
-                    _process_booking(parsed, text, owner_id, ts, app.client, silent_say)
+                    _process_booking(parsed, text, owner_id, ts, app.client, silent_say, channel=cid)
                     processed += 1
                     any_ok = True
                 except Exception as e:
@@ -976,33 +1167,103 @@ def replay_missed_messages():
 # This sweep finds those pairs (same owner + same day, one has booked_at, other
 # doesn't, one's title starts with "FurtherAI + ") and merges metadata onto
 # the GCal copy, then deletes the bot-created duplicate.
-def reconcile_duplicates():
-    since_ms = int((datetime.now(timezone.utc) - timedelta(hours=6)).timestamp() * 1000)
+def _fetch_reconcile_candidates():
+    """All meetings starting now-3d .. now+45d, paginated (bounded at 1000).
+
+    Keyed on START time, not hs_createdate: the bot record is created the
+    moment the BDR posts, but the GCal copy syncs whenever the calendar invite
+    lands — often days or weeks later. The old 6h-createdate window could never
+    see such a pair together, which is how twin records survived to inflate
+    conference counts ~1.7x (151 raw vs 83 real, InsurTech NY Jun 2026)."""
+    lo = int((datetime.now(timezone.utc) - timedelta(days=3)).timestamp() * 1000)
+    hi = int((datetime.now(timezone.utc) + timedelta(days=45)).timestamp() * 1000)
     body = {
         'filterGroups': [{'filters': [
-            {'propertyName': 'hs_createdate', 'operator': 'GTE', 'value': str(since_ms)},
+            {'propertyName': 'hs_meeting_start_time', 'operator': 'BETWEEN',
+             'value': str(lo), 'highValue': str(hi)},
         ]}],
         'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'meeting_sourced_by',
                        'booked_at', 'hubspot_owner_id', 'meeting_type',
                        'meeting_source_channel', 'conference_source', 'hs_timestamp'],
         'limit': 100,
     }
-    r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
-                      headers=HS, json=body, timeout=30)
-    if r.status_code != 200:
+    results = []
+    after = None
+    for _ in range(10):  # bounded pagination
+        if after:
+            body['after'] = after
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code != 200:
+            break
+        data = r.json()
+        results += data.get('results', [])
+        after = ((data.get('paging') or {}).get('next') or {}).get('after')
+        if not after:
+            break
+    return results
+
+
+def _meeting_contacts(meeting_id):
+    """(contact ids, normalized person names) associated with a meeting."""
+    ids, names = set(), set()
+    try:
+        r = requests.get(
+            f'https://api.hubapi.com/crm/v4/objects/meetings/{meeting_id}/associations/contacts',
+            headers=HS, timeout=15)
+        if r.status_code != 200:
+            return ids, names
+        for a in r.json().get('results', [])[:10]:
+            cid = str(a['toObjectId'])
+            ids.add(cid)
+            rc = requests.get(f'https://api.hubapi.com/crm/v3/objects/contacts/{cid}',
+                              headers=HS, params={'properties': 'firstname,lastname'},
+                              timeout=10)
+            if rc.status_code == 200:
+                p = rc.json().get('properties') or {}
+                nm = re.sub(r'\s+', ' ',
+                            f"{p.get('firstname') or ''} {p.get('lastname') or ''}".strip().lower())
+                if nm:
+                    names.add(nm)
+    except Exception:
+        pass
+    return ids, names
+
+
+def _same_meeting_contacts(id_a, id_b):
+    """False when two meetings demonstrably involve DIFFERENT people: both
+    have contacts, no shared contact id, and no shared person name. Guards the
+    twin-merge against same-company-different-person pairs (real case: two
+    Markel walk-ups 55min apart at InsurTech NY — company+time matched, but
+    merging would have deleted Karen's meeting into Allison's). The NAME
+    fallback matters because the bot and GCal often hold separate contact
+    records for the same human (one created without an email)."""
+    ids_a, names_a = _meeting_contacts(id_a)
+    ids_b, names_b = _meeting_contacts(id_b)
+    if not ids_a or not ids_b:
+        return True  # can't verify -> company+time guards are the backstop
+    return bool((ids_a & ids_b) or (names_a & names_b))
+
+
+def reconcile_duplicates():
+    results = _fetch_reconcile_candidates()
+    if not results:
         return 0
     by_key = {}
-    for m in r.json().get('results', []):
+    for m in results:
         p = m.get('properties') or {}
-        oid = p.get('hubspot_owner_id')
         st = p.get('hs_meeting_start_time')
-        if not oid or not st:
+        if not st:
             continue
         try:
             start_dt = datetime.fromisoformat(st.replace('Z', '+00:00'))
         except Exception:
             continue
-        by_key.setdefault((oid, start_dt.date().isoformat()), []).append((m, start_dt, p))
+        # Group by start DATE only. The old (owner, date) key missed real
+        # twins: the GCal copy is owned by whoever's calendar synced (often
+        # the AE) while the bot copy is owned by the BDR. Company-token
+        # containment + the ±2h window below are the actual safety guards.
+        by_key.setdefault(start_dt.date().isoformat(), []).append((m, start_dt, p))
 
     def _norm_company(title):
         if not title: return ''
@@ -1043,6 +1304,10 @@ def reconcile_duplicates():
                 if not bot_company_norm or not gcal_title_norm:
                     continue
                 if bot_company_norm not in gcal_title_norm and gcal_title_norm not in bot_company_norm:
+                    continue
+                # Contact guard: same company + close time is NOT enough —
+                # two different people at one company are two real meetings.
+                if not _same_meeting_contacts(bot_m['id'], gcal_m['id']):
                     continue
                 # Merge bot metadata onto GCal copy
                 merge_props = {}
@@ -1088,7 +1353,7 @@ def reconcile_duplicates():
 
     # Re-group by exact start_time (regardless of booked_at)
     by_start = {}
-    for m in r.json().get('results', []):
+    for m in results:
         p = m.get('properties') or {}
         oid = p.get('hubspot_owner_id'); st = p.get('hs_meeting_start_time')
         if not oid or not st: continue
@@ -1106,6 +1371,8 @@ def reconcile_duplicates():
                 comp_b = _norm_company(p_b.get('hs_meeting_title'))
                 if not comp_b: continue
                 if _edit_distance(comp_a, comp_b, cap=2) > 2: continue
+                # Contact guard (same rationale as pass 1)
+                if not _same_meeting_contacts(m_a['id'], m_b['id']): continue
                 # Winner selection:
                 # 1. If exactly one side has booked_at, that side WINS (never delete a BDR-tagged meeting).
                 # 2. Otherwise prefer the one WITHOUT a [bracket] tag in title (= GCal copy).
@@ -1143,6 +1410,61 @@ def reconcile_duplicates():
     return merged
 
 
+def conference_tag_sweep():
+    """Stamp conference_source on meetings that are missing it.
+
+    GCal-synced meetings never pass through _process_booking, so they carry no
+    conference_source even when they ARE the conference meeting (after the
+    reconciler merges a twin pair, the surviving GCal copy inherits the tag —
+    but un-twinned GCal meetings stay blank). This sweep makes "all meetings
+    for event X" a single property filter instead of title-regex archaeology:
+      - title names the event -> stamp it (any meeting), OR
+      - start falls inside a conference date window AND the meeting is
+        BDR-sourced -> stamp from the window.
+    Internal/customer syncs survive both tests (no event in the title, no
+    meeting_sourced_by), so they are never mis-tagged."""
+    now = datetime.now(timezone.utc)
+    lo = int((now - timedelta(days=7)).timestamp() * 1000)
+    hi = int((now + timedelta(days=60)).timestamp() * 1000)
+    body = {
+        'filterGroups': [{'filters': [
+            {'propertyName': 'hs_meeting_start_time', 'operator': 'BETWEEN',
+             'value': str(lo), 'highValue': str(hi)},
+            {'propertyName': 'conference_source', 'operator': 'NOT_HAS_PROPERTY'},
+        ]}],
+        'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'meeting_sourced_by'],
+        'limit': 100,
+    }
+    tagged = 0
+    after = None
+    for _ in range(10):  # bounded pagination
+        if after:
+            body['after'] = after
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code != 200:
+            break
+        data = r.json()
+        for m in data.get('results', []):
+            p = m.get('properties') or {}
+            conf = detect_conference_from_title(p.get('hs_meeting_title'))
+            if not conf and p.get('meeting_sourced_by'):
+                conf = detect_conference_from_date((p.get('hs_meeting_start_time') or '')[:10])
+            if not conf:
+                continue
+            rp = requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{m["id"]}',
+                                headers=HS,
+                                json={'properties': {'conference_source': conf}},
+                                timeout=30)
+            if rp.status_code == 200:
+                tagged += 1
+                print(f'[conf-tag] {m["id"]} <- {conf} ({(p.get("hs_meeting_title") or "")[:50]!r})')
+        after = ((data.get('paging') or {}).get('next') or {}).get('after')
+        if not after:
+            break
+    return tagged
+
+
 # Sweep: find recently-created GCal meetings with no sourced_by, look up their
 # associated contact's other (bot-created) meetings to copy metadata. Catches
 # the case where the bot tagged a meeting but the patch didn't stick OR where
@@ -1175,6 +1497,12 @@ def reconcile_loop():
                 print(f'[reconcile] merged {n} duplicate pair(s)')
         except Exception as e:
             print(f'[reconcile] error: {e}')
+        try:
+            t = conference_tag_sweep()
+            if t:
+                print(f'[conf-tag] stamped conference_source on {t} meeting(s)')
+        except Exception as e:
+            print(f'[conf-tag] error: {e}')
         time.sleep(300)
 
 
@@ -1302,7 +1630,7 @@ def live_sweep_loop():
                     silent_say = lambda **kw: None
                     for parsed in bookings:
                         try:
-                            _process_booking(parsed, text, owner_id, ts, app.client, silent_say)
+                            _process_booking(parsed, text, owner_id, ts, app.client, silent_say, channel=cid)
                         except Exception as e:
                             print(f'[sweep] process error ts={ts}: {e}')
         except Exception as e:
