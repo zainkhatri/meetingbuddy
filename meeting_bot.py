@@ -123,7 +123,7 @@ Schema:
   "company_name": string|null,
   "meeting_type": "intro"|"demo"|"scoping"|"discovery"|"followup"|"checkin"|"conference"|null,
   "source_channel": "email"|"linkedin"|"referral"|"call"|"conference"|"inbound"|null,
-  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"reuters_es"|"reuters_program_managers"|"other"|null,
+  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"reuters_es"|"reuters_program_managers"|"future_of_insurance"|"other"|null,
   "meeting_date": "YYYY-MM-DD"|null,
   "meeting_time_utc": "HH:MM"|null,
   "location": string|null,
@@ -140,6 +140,7 @@ conference_source rules:
   - Synonyms: "TMPAA" / "TMPCC" / "Target Markets" / "Target Markets Mid-Year" / "Target Markets Annual" → conference_source=tmpaa (same org, one bucket).
   - Synonyms: "Reuters E&S" / "E&S Reuters Conference" / "Reuters - The Insurer E&S" / "Reuters The Insurer E&S" / "E&S Insurer" → conference_source=reuters_es.
   - Synonyms: "Reuters Program Managers" / "Program Managers Conference" / "Reuters - The Insurer Program Manager" / "The Insurer Program Manager" → conference_source=reuters_program_managers.
+  - Synonyms: "Future of Insurance" / "Reuters Future of Insurance" / "Future of Insurance USA" / "FOI" → conference_source=future_of_insurance.
 
 source_channel mapping:
   - "Source: Email" / cold email phrasing → "email"
@@ -276,6 +277,7 @@ _CONF_RULES = [
     (r'\btm[\s_](connect|meeting)\b',     'tmpaa'),
     (r'\brims[\s_]?(riskworld)?\b',       'rims_riskworld'),
     (r'\briskworld\b',                    'rims_riskworld'),
+    (r'\bfuture[\s_]+of[\s_]+insurance\b', 'future_of_insurance'),
     (r'\bnashville\s+dinner\b',           'nashville_dinner'),
     (r'\b(new\s+york|ny)\s+dinner\b',     'ny_dinner'),
     (r'\biiusa\b',                        'iiusa'),
@@ -299,6 +301,7 @@ _CONF_DATE_WINDOWS = [
     ('2026-05-03', '2026-05-07', 'rims_riskworld'),
     ('2026-05-11', '2026-05-12', 'insurance_innovators'),  # Music City Center, Nashville
     ('2026-06-03', '2026-06-04', 'insurtech_insights'),    # New York
+    ('2026-06-24', '2026-06-26', 'future_of_insurance'),   # ponytail: Chicago; widen if FOI meetings land outside this window
 ]
 
 def detect_conference_from_date(date_str):

@@ -46,6 +46,7 @@ CONFERENCE_DISPLAY = {
     'insurance_insider': 'Insurance Insider 2026',
     'reuters_es': 'Reuters - The Insurer E&S',
     'reuters_program_manager': 'Reuters - The Insurer Program Manager',
+    'future_of_insurance': 'Future of Insurance USA (Reuters)',
 }
 
 # HubSpot owner id → display name (matches values in Ellen's "Meeting Sourced By" column)
