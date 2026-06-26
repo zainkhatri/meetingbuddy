@@ -14,10 +14,13 @@ Run via:
         --channel conference-meetings --days 120 [--execute]
 """
 import argparse
+import os
+import sys
 import time
 
 import requests
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import meeting_bot as mb
 
 SLK = {'Authorization': f'Bearer {mb.SLACK_BOT_TOKEN}'}
@@ -41,22 +44,39 @@ def react(channel, ts, name='heart'):
         pass
 
 
-def fetch_messages(cid, cutoff):
+def _fetch_once(cid):
     msgs, cursor = [], None
     while True:  # ponytail: Slack paginates; loop bounded by next_cursor
-        params = {'channel': cid, 'oldest': cutoff, 'limit': 200, 'inclusive': 'true'}
+        # No `oldest`: for a freshly-joined channel Slack returns inconsistent
+        # results when oldest is set. Pull the channel and filter by date below.
+        params = {'channel': cid, 'limit': 200}
         if cursor:
             params['cursor'] = cursor
         r = requests.get('https://slack.com/api/conversations.history',
                          headers=SLK, params=params, timeout=20).json()
         if not r.get('ok'):
             print(f'  slack error: {r.get("error")} (is the bot in this channel?)')
-            break
+            return None
         msgs.extend(r.get('messages') or [])
         cursor = (r.get('response_metadata') or {}).get('next_cursor')
         if not cursor:
             break
     return msgs
+
+
+def fetch_messages(cid, cutoff):
+    # Retry on empty: a just-joined channel is eventually-consistent and
+    # intermittently returns 0 messages even when history exists.
+    msgs = []
+    for attempt in range(5):
+        msgs = _fetch_once(cid)
+        if msgs is None:  # hard API error — don't retry
+            return []
+        if msgs:
+            break
+        print(f'  got 0 messages, retrying ({attempt + 1}/5; channel just-joined consistency)…')
+        time.sleep(2)
+    return [m for m in msgs if float(m.get('ts', 0)) >= cutoff]
 
 
 def main():
@@ -69,7 +89,7 @@ def main():
 
     cid = CHANNEL_ALIASES.get(args.channel, args.channel)
     profile = mb.CHANNEL_PROFILE.get(cid, {})
-    cutoff = str(time.time() - args.days * 86400)
+    cutoff = time.time() - args.days * 86400
     mode = 'EXECUTE' if args.execute else 'DRY-RUN'
     print(f'[{mode}] scanning {args.channel} ({cid}) since {args.days}d ago; '
           f'channel-type={profile.get("meeting_type") or "(text-inferred)"}')
