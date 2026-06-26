@@ -17,6 +17,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -79,12 +80,91 @@ def fetch_messages(cid, cutoff):
     return [m for m in msgs if float(m.get('ts', 0)) >= cutoff]
 
 
+def _patch(meeting_id, props):
+    r = requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{meeting_id}',
+                       headers=mb.HS, json={'properties': props}, timeout=30)
+    return r.status_code == 200
+
+
+def _derive_type(parsed):
+    """Demo vs conference from the post TEXT (the channel is mixed pre-2026-06-12, so
+    the post header — 'DEMO BOOKED' vs '<Conf> MEETING BOOKED' — is the truth). Trust
+    the parser's meeting_type header; only fall to conference_source when it's silent."""
+    pt = parsed.get('meeting_type')
+    if pt == 'demo':
+        return 'demo'
+    if pt == 'conference' or parsed.get('conference_source'):
+        return 'conference'
+    return 'demo'  # demos-booked is BDR prospect bookings; non-conference == demo
+
+
+def reclassify(cid, msgs, execute):
+    """Patch ONLY meeting_type (+conference_source/hs_activity_type) on the matched
+    existing meeting, per the post text. No booked_at re-stamp, no Ellen-sheet push,
+    no deal creation — unlike _process_booking. Never creates meetings."""
+    matched = patched = nomatch = 0
+    for m in reversed(msgs):  # oldest first
+        if m.get('bot_id') or m.get('subtype'):
+            continue
+        text = (m.get('text') or '').strip()
+        ts = m.get('ts')
+        if not text or not ts or not mb._looks_like_booking(text):
+            continue
+        ref = datetime.fromtimestamp(float(ts), timezone.utc).strftime('%Y-%m-%d')
+        try:
+            parsed_raw = mb.parse_with_claude(text, ref)
+        except Exception as e:
+            print(f'  parse error ts={ts}: {e}'); continue
+        bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
+        for parsed in [b for b in bookings if b and b.get('is_booking')]:
+            company = parsed.get('company_name')
+            email = parsed.get('contact_email')
+            date_str = parsed.get('meeting_date')
+            label = f'{parsed.get("contact_first_name","")} {parsed.get("contact_last_name","")}'.strip() \
+                or company or '?'
+            mtype = _derive_type(parsed)
+            try:  # one transient HubSpot timeout shouldn't abort the whole run
+                contact = mb.hs_find_contact(parsed.get('contact_first_name'),
+                                             parsed.get('contact_last_name'), email, company)
+                existing = mb.hs_find_existing_meeting(contact['id'], date_str) if contact else None
+                if existing and company and not email and \
+                        not mb.attribution.title_matches_company(existing.get('title', ''), company):
+                    existing = None
+                if not existing:
+                    existing = mb.hs_find_meeting_by_company_date(company, date_str)
+            except Exception as e:
+                print(f'  [error] {label}: {e}'); continue
+            if not existing:
+                nomatch += 1
+                print(f'  [no-match] {mtype:10} | {label}')
+                continue
+            matched += 1
+            props = {'meeting_type': mtype}
+            if mtype == 'conference':
+                props['hs_activity_type'] = 'Conference'
+                conf = parsed.get('conference_source') or mb.detect_conference_from_title(existing.get('title') or '')
+                if conf:
+                    props['conference_source'] = conf
+            tag = 'PATCH' if execute else 'would'
+            print(f'  [{tag}] {mtype:10} -> {existing["id"]} | {label} | {existing.get("title","")[:38]}')
+            if execute:
+                try:
+                    if _patch(existing['id'], props):
+                        patched += 1
+                except Exception as e:
+                    print(f'  [patch-error] {existing["id"]}: {e}')
+    print(f'\nreclassify done — matched={matched} patched={patched} no-match={nomatch}')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--channel', default='conference-meetings',
                     help='channel name alias (conference-meetings/demos-booked) or raw Slack id')
     ap.add_argument('--days', type=int, default=120)
     ap.add_argument('--execute', action='store_true', help='write to HubSpot (default: dry-run)')
+    ap.add_argument('--reclassify', action='store_true',
+                    help='patch-only: set meeting_type from post text on the matched meeting '
+                         '(for the mixed pre-6/12 demos-booked history). No create/sheet/deal side-effects.')
     args = ap.parse_args()
 
     cid = CHANNEL_ALIASES.get(args.channel, args.channel)
@@ -96,6 +176,10 @@ def main():
 
     msgs = fetch_messages(cid, cutoff)
     print(f'  fetched {len(msgs)} messages')
+
+    if args.reclassify:
+        reclassify(cid, msgs, args.execute)
+        return
 
     silent = lambda **kw: None
     booking_shaped = processed = 0
