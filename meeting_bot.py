@@ -123,7 +123,7 @@ Schema:
   "company_name": string|null,
   "meeting_type": "intro"|"demo"|"scoping"|"discovery"|"followup"|"checkin"|"conference"|null,
   "source_channel": "email"|"linkedin"|"referral"|"call"|"conference"|"inbound"|null,
-  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"reuters_es"|"reuters_program_managers"|"future_of_insurance"|"other"|null,
+  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"reuters_es"|"reuters_program_managers"|"future_of_insurance"|"insurance_fest"|"other"|null,
   "meeting_date": "YYYY-MM-DD"|null,
   "meeting_time_utc": "HH:MM"|null,
   "location": string|null,
@@ -141,6 +141,7 @@ conference_source rules:
   - Synonyms: "Reuters E&S" / "E&S Reuters Conference" / "Reuters - The Insurer E&S" / "Reuters The Insurer E&S" / "E&S Insurer" → conference_source=reuters_es.
   - Synonyms: "Reuters Program Managers" / "Program Managers Conference" / "Reuters - The Insurer Program Manager" / "The Insurer Program Manager" → conference_source=reuters_program_managers.
   - Synonyms: "Future of Insurance" / "Reuters Future of Insurance" / "Future of Insurance USA" / "FOI" → conference_source=future_of_insurance.
+  - Synonyms: "Insurance Fest" / "InsuranceFest" / "Insurance Fest 2026" → conference_source=insurance_fest.
 
 source_channel mapping:
   - "Source: Email" / cold email phrasing → "email"
