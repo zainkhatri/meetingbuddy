@@ -188,8 +188,11 @@ def parse_with_claude(text, reference_date=None):
         txt = re.sub(r'\s*```$', '', txt)
         return json.loads(txt)
     except Exception as e:
-        print(f'Claude parse error: {e}')
-        return None
+        # A parse FAILURE (API error / bad JSON) is not the same as "not a
+        # booking" — return a sentinel so the caller can alert instead of
+        # silently dropping a real booking. See handle_message.
+        print(f'Claude parse error: {e}', flush=True)
+        return {'_parse_error': str(e)}
 
 
 # --- HubSpot helpers ---
@@ -668,6 +671,17 @@ def handle_message(event, client, say, logger):
 
     # Parse — Claude may return a single dict or a list of dicts (multi-booking post)
     parsed_raw = parse_with_claude(text)
+    # Parse error (API/JSON failure) — alert in-thread instead of dropping silently.
+    # The 30-min periodic-restart replay will re-attempt, but surface it now so a
+    # real booking is never lost without anyone noticing.
+    if isinstance(parsed_raw, dict) and parsed_raw.get('_parse_error'):
+        try:
+            say(text="⚠️ I hit an error parsing this and did NOT log it. I'll retry "
+                     "automatically on my next restart — or edit/repost to re-trigger.",
+                thread_ts=ts)
+        except Exception as e:
+            print(f'[live] parse-error alert failed: {e}', flush=True)
+        return
     if not parsed_raw:
         return
     bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
@@ -676,6 +690,17 @@ def handle_message(event, client, say, logger):
         return
 
     owner_id = slack_user_to_owner(client, user_id)
+    # No BDR mapping → the meeting will be created but uncredited (no owner /
+    # sdr_owner). Warn in-thread so it's fixed rather than silently missing from
+    # the dashboard. Expected for AE/teammate posters; a real gap for a BDR.
+    if not owner_id:
+        print(f'[live] no owner mapping for slack user={user_id} — booking uncredited', flush=True)
+        try:
+            say(text=f"⚠️ Logged, but I couldn't map <@{user_id}> to a HubSpot BDR — this "
+                     "booking has **no owner/credit**. If they're a BDR, add them to the roster.",
+                thread_ts=ts)
+        except Exception as e:
+            print(f'[live] no-owner alert failed: {e}', flush=True)
     channel = event.get('channel')
     print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
     try:
