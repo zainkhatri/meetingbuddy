@@ -190,6 +190,22 @@ def main():
         ts = m.get('ts'); user_id = m.get('user')
         if not ts or not user_id:
             continue
+        # Dedup: skip if any HubSpot meeting already carries this post's booked_at.
+        booked_ms = int(float(ts) * 1000)
+        if args.execute:
+            try:
+                dup = requests.post(
+                    'https://api.hubapi.com/crm/v3/objects/meetings/search',
+                    headers=mb.HS,
+                    json={'filterGroups': [{'filters': [
+                        {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
+                    ]}], 'properties': ['hs_meeting_title'], 'limit': 1},
+                    timeout=15)
+                if dup.status_code == 200 and dup.json().get('total', 0) > 0:
+                    print(f'  [skip-dup] {ts} already in HubSpot')
+                    continue
+            except Exception as e:
+                print(f'  [dedup-err] {ts}: {e} — falling through')
         try:
             parsed_raw = mb.parse_with_claude(text)
         except Exception as e:
