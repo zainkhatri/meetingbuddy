@@ -23,7 +23,6 @@ Run:
 
 Runs Slack Socket Mode — no public URL needed.
 """
-import json
 import os
 import re
 import threading
@@ -89,90 +88,91 @@ NAME_TO_OWNER = {
 # --- Claude parser ---
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
-PARSE_PROMPT = """You parse Slack meeting announcements from a sales team. Extract structured data.
+PARSE_PROMPT = """You parse Slack meeting announcements from a sales team.
 
-The team books meetings with insurance industry prospects. Two common formats:
+People write these in many different ways — sloppy, abbreviated, missing fields, unusual formatting. Your job is to extract whatever booking information is there regardless of format. When in doubt about any field, make your best guess from context.
 
-FORMAT A (free-form):
-"Meeting booked! Contact: Jane Doe, COO. Company: Acme Insurance. Demo on 4/30 at 10am. Source: LinkedIn."
+Examples of what you might see:
+- "Meeting booked! Contact: Jane Doe, COO. Company: Acme Insurance. Demo on 4/30 at 10am. Source: LinkedIn."
+- A structured block with a header like "TARGET MARKETS MEETING!" or "DEMO BOOKED!" followed by name/company/date/source/location lines
+- "DEMO BOOKED! Chris Bennett (VP Biz Dev) + Chris Jackson (Director) - @BevCap Management / Tuesday Aug 4 10:30am PST / Source: Cold calls / Zoom"
+- Emojis, typos, missing punctuation, emoji-only headers, all caps, Slack @mentions mixed in
 
-FORMAT B (5-field structured, sometimes with a header like "TARGET MARKETS MEETING!" or "DEMO!" or "CONFERENCE MEETING!"):
-"TARGET MARKETS MEETING!
-Keith Steen – Director, Marine Operations @ Compass Marine Programs
-Austin Devnew – Program Director, CMIP @ Compass Marine Programs
-Thursday, April 30th, 10:00 AM CDT
-Source: Email
-Location: Table #46"
+When multiple attendees appear (e.g. "A + B - Company"), use the FIRST person as the contact; the others are co-attendees, not separate bookings.
 
-FORMAT C (inline multi-contact, same company, single meeting):
-"DEMO BOOKED!
-Chris Bennett (VP Biz Dev) + Chris Jackson (Director Program Development) - @BevCap Management
-Tuesday, August 4th @ 10:30 AM PST
-Source: Cold calls
-Location: Zoom"
-→ Single booking. Use the first contact listed as contact_first_name/last_name/title. Strip leading @ from company name.
+MULTIPLE BOOKINGS: if the post clearly announces meetings with DIFFERENT COMPANIES, call log_bookings once per company. Same company = one booking even with multiple attendees.
 
-All formats are valid bookings — set is_booking=true for any of them.
-
-MULTIPLE BOOKINGS in one message: if the post announces N distinct meetings at DIFFERENT COMPANIES (e.g. "Two booth meetings confirmed: 1. Jane @ Acme ... 2. Bob @ Globex ..."), return a JSON ARRAY of N booking objects. Multiple people from the SAME company attending ONE meeting → single object (use the first person listed as the contact).
-
-Format B header signals the meeting context: "TARGET MARKETS" / "TMPAA" / "TMPCC" → conference_source=tmpaa (all Target Markets / TMPAA events are one bucket); "DEMO" → meeting_type=demo; bare "MEETING!" with no conference → infer from source_channel.
-
-Return ONLY valid JSON (no prose). If a field is not mentioned, use null.
-
-Schema:
-{
-  "is_booking": boolean,
-  "contact_first_name": string|null,
-  "contact_last_name": string|null,
-  "contact_title": string|null,
-  "contact_email": string|null,
-  "contact_linkedin": string|null,
-  "company_name": string|null,
-  "meeting_type": "intro"|"demo"|"scoping"|"discovery"|"followup"|"checkin"|"conference"|null,
-  "source_channel": "email"|"linkedin"|"referral"|"call"|"conference"|"inbound"|null,
-  "conference_source": "wsia_uw_summit"|"wsia_dinner"|"insurtech_ny_spring"|"insurtech_insights"|"insurance_innovators"|"tmpaa"|"rims_riskworld"|"nashville_dinner"|"ny_dinner"|"insurance_insider"|"reuters_es"|"reuters_program_managers"|"future_of_insurance"|"insurance_fest"|"other"|null,
-  "meeting_date": "YYYY-MM-DD"|null,
-  "meeting_time_utc": "HH:MM"|null,
-  "location": string|null,
-  "notes": string|null
-}
-
-`location` is the physical or virtual where (booth, table number, room, address, Zoom). It does NOT belong in conference_source.
+meeting_type inference:
+  - "DEMO" / "demo booked" / demos-booked channel → "demo"
+  - "TARGET MARKETS" / "TMPAA" / "TMPCC" / conference header → "conference"
+  - Otherwise infer from context or null
 
 conference_source rules:
-  - Set ONLY from the EVENT named in the header or Source line ("INSURTECH INSIGHTS MEETING!", "Source: Brella (Insurtech Insights)", "RIMS RISKWORLD 2026", "Insurance Innovators", "MFLive (Insurance Innovators Nashville)", etc.).
-  - DO NOT infer conference_source from words in the COMPANY NAME. A company called "Greater New York Insurance Companies", "InsurTech NY Holdings", "Nashville Brokers", or "Rims Solutions Inc" tells you nothing about which conference the meeting belongs to — only the explicit event tag does.
-  - If the post has no explicit conference header AND no conference in Source → conference_source=null.
-  - Synonyms: "IIUSA" / "Insurance Innovators USA" → conference_source=insurance_innovators (same event).
-  - Synonyms: "TMPAA" / "TMPCC" / "Target Markets" / "Target Markets Mid-Year" / "Target Markets Annual" → conference_source=tmpaa (same org, one bucket).
-  - Synonyms: "Reuters E&S" / "E&S Reuters Conference" / "Reuters - The Insurer E&S" / "Reuters The Insurer E&S" / "E&S Insurer" → conference_source=reuters_es.
-  - Synonyms: "Reuters Program Managers" / "Program Managers Conference" / "Reuters - The Insurer Program Manager" / "The Insurer Program Manager" → conference_source=reuters_program_managers.
-  - Synonyms: "Future of Insurance" / "Reuters Future of Insurance" / "Future of Insurance USA" / "FOI" → conference_source=future_of_insurance.
-  - Synonyms: "Insurance Fest" / "InsuranceFest" / "Insurance Fest 2026" → conference_source=insurance_fest.
+  - Set ONLY from the event named in the header or Source line.
+  - DO NOT infer from company name — "InsurTech NY Holdings" is a company, not a conference.
+  - Synonyms → "tmpaa": TMPAA, TMPCC, Target Markets, Target Markets Mid-Year, Target Markets Annual
+  - Synonyms → "insurtech_ny_spring": ITNY, InsurTech NY
+  - Synonyms → "insurtech_insights": Insurtech Insights, IIUSA, Insurance Innovators USA
+  - Synonyms → "insurance_innovators": Insurance Innovators, MFLive
+  - Synonyms → "rims_riskworld": RIMS, RIMS RiskWorld
+  - Synonyms → "wsia_uw_summit": WSIA, WSIA UW Summit
+  - Synonyms → "reuters_es": Reuters E&S, E&S Reuters, Reuters - The Insurer E&S, E&S Insurer
+  - Synonyms → "reuters_program_managers": Reuters Program Managers, Program Managers Conference, The Insurer Program Manager
+  - Synonyms → "future_of_insurance": Future of Insurance, Reuters Future of Insurance, FOI
+  - Synonyms → "insurance_fest": Insurance Fest, InsuranceFest
+  - Synonyms → "insurance_insider": Insurance Insider
+  - Synonyms → "nashville_dinner": Nashville Dinner
+  - Synonyms → "ny_dinner": NY Dinner
 
-source_channel mapping:
-  - "Source: Email" / cold email phrasing → "email"
-  - "Source: LinkedIn" / LinkedIn URL or DM mentioned as the channel → "linkedin"
-  - "Source: Call" / "Source: Phone" / "Source: Cold calls" / "cold call" / "cold calling" → "call"
-  - "Source: Referral" / "intro from X" → "referral"
-  - "Source: Inbound" / "they reached out" → "inbound"
-  - Any conference-platform source ("Brella", "RIMS RISKWORLD", "Insurtech Insights", "Target Markets", "WSIA", "Insurance Insider", booth/table mentions as the source, header like "TARGET MARKETS MEETING" / "RIMS MEETING" / "INSURTECH INSIGHTS MEETING") → "conference"
-  - When in doubt and a conference is involved → "conference"
+source_channel mapping (be liberal — map anything that's close):
+  - Email / cold email → "email"
+  - LinkedIn / DM / connection → "linkedin"
+  - Call / phone / cold call / cold calls / cold calling / dialed → "call"
+  - Referral / intro / introduction / referred by → "referral"
+  - Inbound / they reached out / they contacted us → "inbound"
+  - Conference platform (Brella, conference name, booth, table) → "conference"
 
-Set is_booking=true AGGRESSIVELY. ANY of these signals → is_booking=true:
-  - Headers like "Demo Booked", "Meeting Booked", "BOOKED!", "DEMO!", "Demo Booked!!", "*Booked!*", "Conference Meeting", "Target Markets Meeting", "ITNY Meeting", "WSIA Meeting", "RIMS Meeting" — even with markdown bold/asterisks
-  - A prospect name + company + date/time mentioned together
-  - Any post listing a person, title, company, and a meeting time
-  - "Demo with X", "Call with X", "Meeting with X" + a future date
-  - Slack bold/italic wrappers (asterisks, underscores) DO NOT change meaning — strip them mentally
+is_booking=true for ANY of: a person's name + company + date/time, headers like "BOOKED" / "DEMO BOOKED" / "MEETING BOOKED", "demo with X", "call with X", "meeting with X" + date. Slack formatting (asterisks, underscores, @mentions) doesn't change the meaning.
+is_booking=false ONLY for: pure chat, internal coordination, availability questions, FYIs with no new meeting.
 
-Set is_booking=false ONLY for: general chat, questions, internal team coordination, asking about availability, status updates that don't announce a new booking, FYIs that don't book a meeting.
+When in doubt: is_booking=true. False negatives (missed bookings) are worse than false positives.
 
-When in doubt, set is_booking=true. False negatives are worse than false positives here.
-
-Message:
+Omit fields that truly aren't mentioned — use null. Strip leading @ from company names.
 """
+
+# Tool schema for structured extraction — forces Claude to return valid JSON (no prose possible).
+_BOOKING_ITEM = {
+    'type': 'object',
+    'properties': {
+        'is_booking':          {'type': 'boolean'},
+        'contact_first_name':  {'type': ['string', 'null']},
+        'contact_last_name':   {'type': ['string', 'null']},
+        'contact_title':       {'type': ['string', 'null']},
+        'contact_email':       {'type': ['string', 'null']},
+        'contact_linkedin':    {'type': ['string', 'null']},
+        'company_name':        {'type': ['string', 'null']},
+        'meeting_type':        {'type': ['string', 'null'], 'enum': ['intro', 'demo', 'scoping', 'discovery', 'followup', 'checkin', 'conference', None]},
+        'source_channel':      {'type': ['string', 'null'], 'enum': ['email', 'linkedin', 'referral', 'call', 'conference', 'inbound', None]},
+        'conference_source':   {'type': ['string', 'null'], 'enum': ['wsia_uw_summit', 'wsia_dinner', 'insurtech_ny_spring', 'insurtech_insights', 'insurance_innovators', 'tmpaa', 'rims_riskworld', 'nashville_dinner', 'ny_dinner', 'insurance_insider', 'reuters_es', 'reuters_program_managers', 'future_of_insurance', 'insurance_fest', 'other', None]},
+        'meeting_date':        {'type': ['string', 'null'], 'description': 'YYYY-MM-DD'},
+        'meeting_time_utc':    {'type': ['string', 'null'], 'description': 'HH:MM in UTC'},
+        'location':            {'type': ['string', 'null']},
+        'notes':               {'type': ['string', 'null']},
+    },
+    'required': ['is_booking'],
+}
+
+PARSE_TOOL = {
+    'name': 'log_bookings',
+    'description': 'Log all meeting bookings found in the Slack post.',
+    'input_schema': {
+        'type': 'object',
+        'properties': {
+            'bookings': {'type': 'array', 'items': _BOOKING_ITEM},
+        },
+        'required': ['bookings'],
+    },
+}
 
 
 def parse_with_claude(text, reference_date=None):
@@ -180,26 +180,21 @@ def parse_with_claude(text, reference_date=None):
         return None
     ref = reference_date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     prompt = (PARSE_PROMPT
-              + f"\n[Reference date — the message was posted on {ref}. "
-                f"If the message gives a date without a year, assume the year that makes "
-                f"the meeting fall AFTER the reference date (typically the same year, or "
-                f"next year if the month has already passed). NEVER default to past years.]\n\n"
+              + f"\n[Reference date: {ref}. Dates without a year → pick the year that puts "
+                f"the meeting AFTER the reference date. Never default to past years.]\n\n"
               + text)
     try:
         r = client.messages.create(
             model='claude-haiku-4-5-20251001',
             max_tokens=1024,
+            tools=[PARSE_TOOL],
+            tool_choice={'type': 'tool', 'name': 'log_bookings'},
             messages=[{'role': 'user', 'content': prompt}],
         )
-        txt = r.content[0].text.strip()
-        # Strip markdown code fences if present
-        txt = re.sub(r'^```json\s*', '', txt)
-        txt = re.sub(r'\s*```$', '', txt)
-        return json.loads(txt)
+        tool_block = next(b for b in r.content if b.type == 'tool_use')
+        bookings = tool_block.input.get('bookings', [])
+        return bookings if len(bookings) != 1 else bookings[0]
     except Exception as e:
-        # A parse FAILURE (API error / bad JSON) is not the same as "not a
-        # booking" — return a sentinel so the caller can alert instead of
-        # silently dropping a real booking. See handle_message.
         print(f'Claude parse error: {e}', flush=True)
         return {'_parse_error': str(e)}
 
