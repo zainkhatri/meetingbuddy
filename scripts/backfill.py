@@ -35,12 +35,6 @@ CHANNEL_ALIASES = {
 }
 
 
-def react(channel, ts):
-    try:
-        mb._random_react(requests, channel, ts)
-    except Exception:
-        pass
-
 
 def _fetch_once(cid):
     msgs, cursor = [], None
@@ -236,8 +230,7 @@ def main():
             except Exception as e:
                 print(f'  process error ts={ts}: {e}')
         if any_ok and args.execute:
-            react(cid, ts)
-            print(f'  ❤️  {ts}  {preview}')
+            print(f'  logged {ts}  {preview}')
 
     print(f'\ndone [{mode}] — {booking_shaped} booking-shaped, {processed} '
           f'{"would be " if not args.execute else ""}processed')

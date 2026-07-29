@@ -91,17 +91,18 @@ _REACT_EMOJIS = [
     'zap', 'star2', 'muscle', 'raised_hands', 'chart_with_upwards_trend',
 ]
 
-def _random_react(client_or_requests, channel, ts):
-    """Add a random celebration reaction. Accepts Slack SDK client or requests module."""
-    name = random.choice(_REACT_EMOJIS)
-    try:
-        if hasattr(client_or_requests, 'reactions_add'):
-            client_or_requests.reactions_add(channel=channel, timestamp=ts, name=name)
-        else:
-            requests.post('https://slack.com/api/reactions.add', headers=SLK,
-                          data={'channel': channel, 'timestamp': ts, 'name': name}, timeout=10)
-    except Exception:
-        pass
+def _random_react(client_or_requests, channel, ts, count=1):
+    """Add random celebration reactions. count>1 for live bookings going crazy."""
+    is_sdk = hasattr(client_or_requests, 'reactions_add')
+    for name in random.sample(_REACT_EMOJIS, min(count, len(_REACT_EMOJIS))):
+        try:
+            if is_sdk:
+                client_or_requests.reactions_add(channel=channel, timestamp=ts, name=name)
+            else:
+                requests.post('https://slack.com/api/reactions.add', headers=SLK,
+                              data={'channel': channel, 'timestamp': ts, 'name': name}, timeout=10)
+        except Exception:
+            pass
 
 
 # --- Claude parser ---
@@ -726,7 +727,7 @@ def handle_message(event, client, say, logger):
             print(f'[live] no-owner alert failed: {e}', flush=True)
     channel = event.get('channel')
     print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
-    _random_react(client, channel, ts)
+    _random_react(client, channel, ts, count=4)
     for parsed in bookings:
         _process_booking(parsed, text, owner_id, ts, client, say, channel=channel)
 
