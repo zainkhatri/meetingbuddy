@@ -24,6 +24,7 @@ Run:
 Runs Slack Socket Mode — no public URL needed.
 """
 import os
+import random
 import re
 import threading
 import time
@@ -84,6 +85,24 @@ NAME_TO_OWNER = {
     'trotter': '164943105',   # Ben Trotter
     'stapleton': '92184259',  # Matt Stapleton
 }
+
+_REACT_EMOJIS = [
+    'white_check_mark', 'rocket', 'fire', 'tada', 'moneybag',
+    'zap', 'star2', 'muscle', 'raised_hands', 'chart_with_upwards_trend',
+]
+
+def _random_react(client_or_requests, channel, ts):
+    """Add a random celebration reaction. Accepts Slack SDK client or requests module."""
+    name = random.choice(_REACT_EMOJIS)
+    try:
+        if hasattr(client_or_requests, 'reactions_add'):
+            client_or_requests.reactions_add(channel=channel, timestamp=ts, name=name)
+        else:
+            requests.post('https://slack.com/api/reactions.add', headers=SLK,
+                          data={'channel': channel, 'timestamp': ts, 'name': name}, timeout=10)
+    except Exception:
+        pass
+
 
 # --- Claude parser ---
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
@@ -707,10 +726,7 @@ def handle_message(event, client, say, logger):
             print(f'[live] no-owner alert failed: {e}', flush=True)
     channel = event.get('channel')
     print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
-    try:
-        client.reactions_add(channel=channel, timestamp=ts, name='heart')
-    except Exception as e:
-        print(f'[live] reactions_add failed: {e}')
+    _random_react(client, channel, ts)
     for parsed in bookings:
         _process_booking(parsed, text, owner_id, ts, client, say, channel=channel)
 
@@ -1164,15 +1180,7 @@ def replay_missed_messages():
                     timeout=15)
                 if dup_search.status_code == 200 and dup_search.json().get('total', 0) > 0:
                     print(f'[replay] skip ts={ts}: booked_at already tagged on an existing meeting')
-                    # Recover the heart in case the original processor crashed
-                    # after tagging HubSpot but before reacting (or reactions_add
-                    # failed silently). Slack returns already_reacted harmlessly.
-                    try:
-                        requests.post('https://slack.com/api/reactions.add', headers=SLK,
-                                      data={'channel': cid, 'timestamp': ts, 'name': 'heart'},
-                                      timeout=10)
-                    except Exception:
-                        pass
+                    _random_react(requests, cid, ts)
                     continue
             except Exception as e:
                 print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
@@ -1185,10 +1193,7 @@ def replay_missed_messages():
                 except Exception as e:
                     print(f'[replay] process error ts={ts}: {e}')
             if any_ok:
-                try:
-                    app.client.reactions_add(channel=cid, timestamp=ts, name='heart')
-                except Exception:
-                    pass
+                _random_react(app.client, cid, ts)
         print(f'[replay] {ch.get("name")}: {kept} booking-shaped, {processed} processed (cumulative)')
     print(f'[replay] done — re-processed {processed} booking(s) from last 24h')
 
@@ -1637,13 +1642,7 @@ def live_sweep_loop():
                         already_tagged = dup.status_code == 200 and dup.json().get('total', 0) > 0
                     except Exception:
                         already_tagged = False
-                    # Always try the heart; Slack returns already_reacted harmlessly
-                    try:
-                        requests.post('https://slack.com/api/reactions.add', headers=SLK,
-                                      data={'channel': cid, 'timestamp': ts, 'name': 'heart'},
-                                      timeout=10)
-                    except Exception:
-                        pass
+                    _random_react(requests, cid, ts)
                     if already_tagged:
                         continue
                     print(f'[sweep] catching missed booking ts={ts}')

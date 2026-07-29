@@ -35,12 +35,9 @@ CHANNEL_ALIASES = {
 }
 
 
-def react(channel, ts, name='heart'):
+def react(channel, ts):
     try:
-        requests.post('https://slack.com/api/reactions.add',
-                      headers=SLK,
-                      data={'channel': channel, 'timestamp': ts, 'name': name},
-                      timeout=10)
+        mb._random_react(requests, channel, ts)
     except Exception:
         pass
 
