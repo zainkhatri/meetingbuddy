@@ -104,9 +104,17 @@ Thursday, April 30th, 10:00 AM CDT
 Source: Email
 Location: Table #46"
 
-Both are valid bookings — set is_booking=true for either.
+FORMAT C (inline multi-contact, same company, single meeting):
+"DEMO BOOKED!
+Chris Bennett (VP Biz Dev) + Chris Jackson (Director Program Development) - @BevCap Management
+Tuesday, August 4th @ 10:30 AM PST
+Source: Cold calls
+Location: Zoom"
+→ Single booking. Use the first contact listed as contact_first_name/last_name/title. Strip leading @ from company name.
 
-MULTIPLE BOOKINGS in one message: if the post announces N distinct meetings (different contact AND/OR different company, e.g. "Two booth meetings confirmed: 1. ... 2. ..."), return a JSON ARRAY of N booking objects, one per meeting. If it's a single meeting (even with co-attendees from the same company), return a single object.
+All formats are valid bookings — set is_booking=true for any of them.
+
+MULTIPLE BOOKINGS in one message: if the post announces N distinct meetings at DIFFERENT COMPANIES (e.g. "Two booth meetings confirmed: 1. Jane @ Acme ... 2. Bob @ Globex ..."), return a JSON ARRAY of N booking objects. Multiple people from the SAME company attending ONE meeting → single object (use the first person listed as the contact).
 
 Format B header signals the meeting context: "TARGET MARKETS" / "TMPAA" / "TMPCC" → conference_source=tmpaa (all Target Markets / TMPAA events are one bucket); "DEMO" → meeting_type=demo; bare "MEETING!" with no conference → infer from source_channel.
 
@@ -146,7 +154,7 @@ conference_source rules:
 source_channel mapping:
   - "Source: Email" / cold email phrasing → "email"
   - "Source: LinkedIn" / LinkedIn URL or DM mentioned as the channel → "linkedin"
-  - "Source: Call" / "Source: Phone" → "call"
+  - "Source: Call" / "Source: Phone" / "Source: Cold calls" / "cold call" / "cold calling" → "call"
   - "Source: Referral" / "intro from X" → "referral"
   - "Source: Inbound" / "they reached out" → "inbound"
   - Any conference-platform source ("Brella", "RIMS RISKWORLD", "Insurtech Insights", "Target Markets", "WSIA", "Insurance Insider", booth/table mentions as the source, header like "TARGET MARKETS MEETING" / "RIMS MEETING" / "INSURTECH INSIGHTS MEETING") → "conference"
