@@ -1655,6 +1655,7 @@ def live_sweep_loop():
                     if not bookings:
                         continue
                     owner_id = slack_user_to_owner(app.client, user_id)
+                    _random_react(app.client, cid, ts, count=3)
                     silent_say = lambda **kw: None
                     for parsed in bookings:
                         try:
