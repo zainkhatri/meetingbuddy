@@ -727,7 +727,7 @@ def handle_message(event, client, say, logger):
             print(f'[live] no-owner alert failed: {e}', flush=True)
     channel = event.get('channel')
     print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
-    _random_react(client, channel, ts, count=4)
+    _random_react(client, channel, ts, count=3)
     for parsed in bookings:
         _process_booking(parsed, text, owner_id, ts, client, say, channel=channel)
 
@@ -1181,7 +1181,6 @@ def replay_missed_messages():
                     timeout=15)
                 if dup_search.status_code == 200 and dup_search.json().get('total', 0) > 0:
                     print(f'[replay] skip ts={ts}: booked_at already tagged on an existing meeting')
-                    _random_react(requests, cid, ts)
                     continue
             except Exception as e:
                 print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
@@ -1193,8 +1192,6 @@ def replay_missed_messages():
                     any_ok = True
                 except Exception as e:
                     print(f'[replay] process error ts={ts}: {e}')
-            if any_ok:
-                _random_react(app.client, cid, ts)
         print(f'[replay] {ch.get("name")}: {kept} booking-shaped, {processed} processed (cumulative)')
     print(f'[replay] done — re-processed {processed} booking(s) from last 24h')
 
@@ -1643,7 +1640,6 @@ def live_sweep_loop():
                         already_tagged = dup.status_code == 200 and dup.json().get('total', 0) > 0
                     except Exception:
                         already_tagged = False
-                    _random_react(requests, cid, ts)
                     if already_tagged:
                         continue
                     print(f'[sweep] catching missed booking ts={ts}')
