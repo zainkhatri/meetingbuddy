@@ -69,9 +69,13 @@ bot already holds an Anthropic client):
   conference referred to as `<raw>`? Return the canonical name and the year."
   Forced through a small tool schema so it returns `{name, year, confident}`.
 - `year`: from `raw` if it carries one, else the year of `meeting_date`.
-- **Best-effort:** on any error, low confidence, or ambiguous result, return
-  `None` and fall back to the raw name. The Slack notice (§5) is the human
-  safety net for a wrong or missing lookup — reviewer renames/merges.
+- **Best-effort, confident-only:** use the looked-up name ONLY when the tool
+  returns `confident: true`. On any error, low confidence, or ambiguous result,
+  fall back to the BDR's raw text. Obscure industry acronyms (e.g. BTC =
+  *Broker Tech Conference*, not Bitcoin) are exactly where a generic search
+  mis-guesses — so the Slack notice (§6) is ALWAYS posted on create as a
+  human confirm/rename prompt, whether the label came from the lookup or the
+  raw fallback.
 
 ### 3. Normalize (pure function)
 
@@ -141,21 +145,23 @@ other change needed there. Existing title-regex and date-window fallbacks stay.
 
 ### 6. Slack notice
 
-When §4 creates a new option, post in the booking's thread:
+**Always** posted when §4 creates a new option (not just when the lookup is
+unsure) — it is the confirm/rename backstop for unreliable acronym lookups.
+Post in the booking's thread:
 
-> 🆕 New event source *Bermuda Captive Conference 2026* created in HubSpot —
-> reply to rename or merge.
+> 🆕 New event source *Broker Tech Conference 2026* created in HubSpot —
+> reply to rename or merge if that's wrong.
 
-Threaded (not channel-level) to stay low-noise. Purely informational; the
-booking already succeeded. Doubles as the correction path for a wrong web
-lookup.
+Threaded (not channel-level) to stay low-noise. The booking already
+succeeded; this is the human confirmation step.
 
 ### 7. One-off: fix Dani's existing meeting
 
 After ship, meeting `390614433491` still reads `other`. Directly patch it once:
-ensure the `btc_2026` bucket exists (via the same resolve path), set
-`conference_source='btc_2026'`, fix the title tag `[other]` -> `[btc_2026]`.
-Small script or manual PATCH — not part of the runtime path.
+ensure the `broker_tech_conference_2026` bucket exists (label "Broker Tech
+Conference 2026"), set `conference_source='broker_tech_conference_2026'`, fix
+the title tag `[other]` -> `[broker_tech_conference_2026]`. Small script or
+manual PATCH — not part of the runtime path.
 
 ## Out of scope
 
