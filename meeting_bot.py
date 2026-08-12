@@ -318,6 +318,20 @@ def detect_conference_from_title(title):
     return None
 
 
+def slugify_conference(name, year):
+    """(value, label) for a new conference bucket, or None for junk.
+    value = '<name-slug>_<year>', label = '<Name> <year>'. Year always kept."""
+    if not name or not year:
+        return None
+    clean = name.strip()
+    core = re.sub(r'[^a-z0-9]+', '_', clean.lower()).strip('_')
+    if not core or core.isdigit():
+        return None
+    value = f'{core}_{year}'[:50]
+    label = f'{clean} {year}'
+    return value, label
+
+
 # Conference date windows (start_date, end_date_inclusive, conf_value).
 # Used as fallback when title has no marker and Claude didn't classify.
 _CONF_DATE_WINDOWS = [
