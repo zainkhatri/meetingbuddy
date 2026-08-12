@@ -177,7 +177,7 @@ _BOOKING_ITEM = {
         'company_name':        {'type': ['string', 'null']},
         'meeting_type':        {'type': ['string', 'null'], 'enum': ['intro', 'demo', 'scoping', 'discovery', 'followup', 'checkin', 'conference', None]},
         'source_channel':      {'type': ['string', 'null'], 'enum': ['email', 'linkedin', 'referral', 'call', 'conference', 'inbound', None]},
-        'conference_source':   {'type': ['string', 'null'], 'enum': ['wsia_uw_summit', 'wsia_dinner', 'insurtech_ny_spring', 'insurtech_insights', 'insurance_innovators', 'tmpaa', 'rims_riskworld', 'nashville_dinner', 'ny_dinner', 'insurance_insider', 'reuters_es', 'reuters_program_managers', 'future_of_insurance', 'insurance_fest', 'other', None]},
+        'conference_source':   {'type': ['string', 'null'], 'enum': ['wsia_uw_summit', 'wsia_dinner', 'insurtech_ny_spring', 'insurtech_insights', 'insurance_innovators', 'tmpaa', 'tmpcc', 'iiusa', 'rims_riskworld', 'nashville_dinner', 'ny_dinner', 'insurance_insider', 'reuters_es', 'reuters_program_managers', 'future_of_insurance', 'insurance_fest', 'other', None]},
         'conference_name_raw': {'type': ['string', 'null']},
         'meeting_date':        {'type': ['string', 'null'], 'description': 'YYYY-MM-DD'},
         'meeting_time_utc':    {'type': ['string', 'null'], 'description': 'HH:MM in UTC'},
