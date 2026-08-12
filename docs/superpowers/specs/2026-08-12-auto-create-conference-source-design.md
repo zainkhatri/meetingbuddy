@@ -163,10 +163,15 @@ Conference 2026"), set `conference_source='broker_tech_conference_2026'`, fix
 the title tag `[other]` -> `[broker_tech_conference_2026]`. Small script or
 manual PATCH — not part of the runtime path.
 
+### 8. Close the tmpcc/iiusa enum gap
+
+`tmpcc` and `iiusa` exist in HubSpot's dropdown and in `_CONF_RULES`, but are
+missing from the closed `conference_source` enum at `:176`, so Claude can't
+return them directly (only the regex fallback catches them). Add both to the
+enum. One line.
+
 ## Out of scope
 
-- The latent enum gap where `tmpcc`/`iiusa` exist in HubSpot + regex but are
-  missing from the `:176` enum. One-line fix, noted but separate.
 - Merging/renaming buckets from Slack replies (the notice says "reply to
   rename/merge" as a human cue; automating the merge is a later project).
 
