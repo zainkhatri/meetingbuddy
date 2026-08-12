@@ -28,6 +28,7 @@ import random
 import re
 import threading
 import time
+import json
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -330,6 +331,60 @@ def slugify_conference(name, year):
     value = f'{core}_{year}'[:50]
     label = f'{clean} {year}'
     return value, label
+
+
+def _year_from(raw, meeting_date):
+    m = re.search(r'\b(20\d{2})\b', raw or '')
+    if m:
+        return int(m.group(1))
+    if meeting_date and len(meeting_date) >= 4 and meeting_date[:4].isdigit():
+        return int(meeting_date[:4])
+    return None
+
+
+def canonicalize_conference(raw, meeting_date):
+    """Best-effort: expand an event acronym to its official name via web search.
+    Confident-only — falls back to the raw text on any error/low confidence.
+    Returns {'name', 'year'} or None if no year can be derived."""
+    year = _year_from(raw, meeting_date)
+    if not year:
+        return None
+    name = (raw or '').strip()
+    # Strip a trailing year token from the raw name so the label isn't "BTC 2026 2026".
+    name = re.sub(r'\s*\b20\d{2}\b\s*$', '', name).strip() or name
+    if not client:
+        return {'name': name, 'year': year}
+    try:
+        r = client.messages.create(
+            model='claude-opus-4-8',
+            max_tokens=1024,
+            tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
+            system=("You identify insurance/insurtech industry conferences. "
+                    "Search the web, then reply with ONLY a JSON object: "
+                    '{"name": "<official full name, no year>", "confident": true|false}. '
+                    "Set confident=false if you are not sure the acronym maps to a real event."),
+            messages=[{'role': 'user',
+                       'content': f'What conference is "{raw}" (an insurance industry event)?'}],
+        )
+        # Server tool loop may pause; re-send up to 3x to let it finish (fixed bound).
+        msgs = [{'role': 'user', 'content': f'What conference is "{raw}"?'}]
+        hops = 0
+        while r.stop_reason == 'pause_turn' and hops < 3:
+            hops += 1
+            msgs.append({'role': 'assistant', 'content': r.content})
+            r = client.messages.create(
+                model='claude-opus-4-8', max_tokens=1024,
+                tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
+                messages=msgs)
+        text = ''.join(b.text for b in r.content if getattr(b, 'type', '') == 'text')
+        mjson = re.search(r'\{.*\}', text, re.S)
+        if mjson:
+            data = json.loads(mjson.group(0))
+            if data.get('confident') and data.get('name'):
+                return {'name': str(data['name']).strip(), 'year': year}
+    except Exception as e:
+        print(f'[conf] canonicalize failed for {raw!r}: {e}', flush=True)
+    return {'name': name, 'year': year}
 
 
 # Conference date windows (start_date, end_date_inclusive, conf_value).
