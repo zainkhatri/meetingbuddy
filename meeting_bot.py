@@ -932,6 +932,18 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
     if not parsed.get('meeting_type') and parsed.get('conference_source'):
         parsed['meeting_type'] = 'conference'
 
+    # New/unknown conference → resolve to a real HubSpot bucket (create if needed).
+    # Only when the parser couldn't map it (None or catch-all 'other') and a raw
+    # event name is present. Overrides 'other' only when a concrete bucket results.
+    if parsed.get('conference_source') in (None, 'other') and parsed.get('conference_name_raw'):
+        resolved = resolve_or_create_conference(
+            parsed['conference_name_raw'], parsed.get('meeting_date'))
+        if resolved:
+            parsed['conference_source'] = resolved['value']
+            if resolved['created'] and say and ts:
+                say(text=f"🆕 New event source *{resolved['label']}* created in HubSpot "
+                         f"— reply to rename or merge if that's wrong.", thread_ts=ts)
+
     # Fold location into notes (no dedicated meeting_location property)
     loc = parsed.get('location')
     notes_combined = parsed.get('notes') or ''
