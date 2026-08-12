@@ -144,6 +144,9 @@ conference_source rules:
   - Synonyms → "insurance_insider": Insurance Insider
   - Synonyms → "nashville_dinner": Nashville Dinner
   - Synonyms → "ny_dinner": NY Dinner
+  - conference_name_raw: the LITERAL event name as written, taken ONLY from an
+    explicit "Event Source:" / "Source:" line or a conference header (e.g. "BTC 2026").
+    Do NOT infer it from the company name or stray words. Null if none is named.
 
 source_channel mapping (be liberal — map anything that's close):
   - Email / cold email → "email"
@@ -175,6 +178,7 @@ _BOOKING_ITEM = {
         'meeting_type':        {'type': ['string', 'null'], 'enum': ['intro', 'demo', 'scoping', 'discovery', 'followup', 'checkin', 'conference', None]},
         'source_channel':      {'type': ['string', 'null'], 'enum': ['email', 'linkedin', 'referral', 'call', 'conference', 'inbound', None]},
         'conference_source':   {'type': ['string', 'null'], 'enum': ['wsia_uw_summit', 'wsia_dinner', 'insurtech_ny_spring', 'insurtech_insights', 'insurance_innovators', 'tmpaa', 'rims_riskworld', 'nashville_dinner', 'ny_dinner', 'insurance_insider', 'reuters_es', 'reuters_program_managers', 'future_of_insurance', 'insurance_fest', 'other', None]},
+        'conference_name_raw': {'type': ['string', 'null']},
         'meeting_date':        {'type': ['string', 'null'], 'description': 'YYYY-MM-DD'},
         'meeting_time_utc':    {'type': ['string', 'null'], 'description': 'HH:MM in UTC'},
         'location':            {'type': ['string', 'null']},
