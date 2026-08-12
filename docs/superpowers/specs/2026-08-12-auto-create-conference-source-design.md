@@ -54,24 +54,55 @@ The existing closed `conference_source` enum stays — for known events Claude
 still maps to the canonical slug (BTC will come back as `other`, which we treat
 as "unresolved, check raw").
 
-### 2. Normalize (pure function)
+### 2. Canonicalize via web lookup (best-effort)
 
 ```
-slugify_conference(raw) -> (value, label)
+canonicalize_conference(raw, meeting_date) -> {name, year} | None
 ```
 
-- `label`: raw, trimmed, trailing year token stripped ("BTC 2026" -> "BTC").
-- `value`: label lowercased, non-alphanumeric -> `_`, collapse repeats, strip
-  edge `_` ("BTC" -> "btc"). Cap length at 50.
-- Returns `None` if the result is empty or all-digits (guards junk).
+The raw name is often a terse acronym ("BTC 2026"). Looking it up ties every
+spelling/alias of the same event to one canonical name, and gives marketing a
+readable label. Uses Claude's web-search server tool (Anthropic API — the
+bot already holds an Anthropic client):
 
-### 3. Resolve-or-create (the core)
+- Prompt: "What is the official full name of the insurance/insurtech
+  conference referred to as `<raw>`? Return the canonical name and the year."
+  Forced through a small tool schema so it returns `{name, year, confident}`.
+- `year`: from `raw` if it carries one, else the year of `meeting_date`.
+- **Best-effort:** on any error, low confidence, or ambiguous result, return
+  `None` and fall back to the raw name. The Slack notice (§5) is the human
+  safety net for a wrong or missing lookup — reviewer renames/merges.
+
+### 3. Normalize (pure function)
 
 ```
-resolve_or_create_conference(raw) -> value | None
+slugify_conference(canonical_name, year) -> (value, label)
 ```
 
-1. `slugify_conference(raw)` -> candidate `(value, label)`. None -> return None.
+- `label`: `"<Canonical Name> <year>"` — **year kept**
+  (e.g. "Bermuda Captive Conference 2026"). Falls back to the raw name + year
+  when the lookup returned nothing ("BTC 2026").
+- `value`: `<name-slug>_<year>` — name lowercased, non-alphanumeric -> `_`,
+  collapse repeats, strip edge `_`, then `_<year>`
+  (e.g. `bermuda_captive_conference_2026`, fallback `btc_2026`). Cap 50 chars.
+- Per-year buckets: BTC 2026 and BTC 2027 are distinct options, so marketing
+  attributes spend per event instance. All *aliases of the same year* collapse
+  to one value via the canonicalized name.
+- Returns `None` if the name part is empty or all-digits (guards junk).
+
+> Note: legacy buckets (`tmpaa`, `wsia_uw_summit`) are year-less; auto-created
+> ones are per-year. Deliberate — the year was explicitly requested for new
+> events. Not retrofitting the legacy set.
+
+### 4. Resolve-or-create (the core)
+
+```
+resolve_or_create_conference(raw, meeting_date) -> value | None
+```
+
+1. `canonicalize_conference(raw, meeting_date)` -> `{name, year}` (or fall back
+   to raw + date-year). `slugify_conference(name, year)` -> candidate
+   `(value, label)`. None -> return None.
 2. Fetch the dropdown options (in-process cache; refresh after any create).
 3. **Dedup:** normalize every existing option's `value` AND `label` the same
    way. If candidate value == an existing value, or candidate normalized-label
@@ -81,14 +112,14 @@ resolve_or_create_conference(raw) -> value | None
    `{label, value, hidden: false, displayOrder: -1}`, `PATCH` the full options
    array back to `/crm/v3/properties/meetings/conference_source` (HubSpot
    replaces the whole list — existing options, incl. hidden ones, preserved).
-5. Post a Slack notice (see §5). Return the new value.
+5. Post a Slack notice (see §6). Return the new value.
 
 Concurrency: the live handler and the `live_sweep` thread can process bookings
 simultaneously. Create runs under a dedicated lock, and re-fetches options
 inside the lock, so two new-conference bookings can't double-create or clobber
 each other's options.
 
-### 4. Wire into the flow
+### 5. Wire into the flow
 
 In `_process_booking`, after the existing source_channel/meeting_type defaults
 (`~:790-795`), centralize conference resolution:
@@ -96,7 +127,8 @@ In `_process_booking`, after the existing source_channel/meeting_type defaults
 ```
 conf = parsed.get('conference_source')
 if conf in (None, 'other') and parsed.get('conference_name_raw'):
-    resolved = resolve_or_create_conference(parsed['conference_name_raw'])
+    resolved = resolve_or_create_conference(
+        parsed['conference_name_raw'], parsed.get('meeting_date'))
     if resolved:
         conf = resolved
 parsed['conference_source'] = conf
@@ -107,21 +139,23 @@ Only overrides `other` when a concrete bucket results — a genuinely unnamed
 new-meeting create) already read `parsed['conference_source']` / `conf`, so no
 other change needed there. Existing title-regex and date-window fallbacks stay.
 
-### 5. Slack notice
+### 6. Slack notice
 
-When §3 creates a new option, post in the booking's thread:
+When §4 creates a new option, post in the booking's thread:
 
-> 🆕 New event source *BTC* created in HubSpot — reply to rename or merge.
+> 🆕 New event source *Bermuda Captive Conference 2026* created in HubSpot —
+> reply to rename or merge.
 
 Threaded (not channel-level) to stay low-noise. Purely informational; the
-booking already succeeded.
+booking already succeeded. Doubles as the correction path for a wrong web
+lookup.
 
-### 6. One-off: fix Dani's existing meeting
+### 7. One-off: fix Dani's existing meeting
 
 After ship, meeting `390614433491` still reads `other`. Directly patch it once:
-ensure the `btc` bucket exists, set `conference_source='btc'`, fix the title
-tag `[other]` -> `[btc]`. Small script or manual PATCH — not part of the
-runtime path.
+ensure the `btc_2026` bucket exists (via the same resolve path), set
+`conference_source='btc_2026'`, fix the title tag `[other]` -> `[btc_2026]`.
+Small script or manual PATCH — not part of the runtime path.
 
 ## Out of scope
 
@@ -132,15 +166,18 @@ runtime path.
 
 ## Testing
 
-One `test_*.py`, pure-function only (no HubSpot calls):
-- `slugify_conference`: "BTC 2026" -> `('btc','BTC')`; strips year; junk/empty
-  -> None; punctuation collapses.
-- dedup match: candidate whose normalized label equals an existing option's
-  normalized label returns the existing value (assert no-create path).
+One `test_*.py`, pure-function only (no HubSpot/web calls):
+- `slugify_conference`: `("BTC", 2026)` -> `('btc_2026', 'BTC 2026')`;
+  punctuation collapses; empty/all-digit name -> None.
+- dedup match: candidate whose normalized value/label equals an existing
+  option's returns the existing value (assert no-create path).
+- `canonicalize_conference`: web call is mocked/skipped — assert the raw+year
+  fallback path produces a sane `{name, year}` when lookup returns nothing.
 
 ## Files touched
 
-- `meeting_bot.py` — schema field, prompt line, `slugify_conference`,
-  `resolve_or_create_conference`, wire into `_process_booking`, Slack notice.
+- `meeting_bot.py` — schema field, prompt line, `canonicalize_conference`
+  (web lookup), `slugify_conference`, `resolve_or_create_conference`, wire into
+  `_process_booking`, Slack notice.
 - `tests/test_conference_autocreate.py` — new.
 - one-off patch for meeting `390614433491`.
