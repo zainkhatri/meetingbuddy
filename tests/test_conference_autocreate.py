@@ -30,3 +30,9 @@ def test_canonicalize_year_from_meeting_date(monkeypatch):
 def test_canonicalize_no_year_returns_none(monkeypatch):
     monkeypatch.setattr(mb, "client", None)
     assert mb.canonicalize_conference("Broker Tech Conference", None) is None
+
+
+def test_norm_option_matches_alias():
+    # normalization used for dedup: lowercase alnum, drop underscores
+    assert mb._norm_opt("Broker Tech Conference 2026") == mb._norm_opt("broker_tech_conference_2026")
+    assert mb._norm_opt("WSIA") != mb._norm_opt("WSIA Dinner")

@@ -514,6 +514,51 @@ def hs_update_meeting(meeting_id, sourced_by, mtype=None, channel=None, conf=Non
     return r.status_code == 200
 
 
+_conf_opts_cache = None
+_conf_opts_lock = threading.Lock()
+_CONF_PROP_URL = 'https://api.hubapi.com/crm/v3/properties/meetings/conference_source'
+
+def _norm_opt(s):
+    """Normalize a value/label for dedup: lowercase, alphanumeric only."""
+    return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
+
+def hs_conference_options(force=False):
+    """Cached list of {'value','label','hidden'} for conference_source."""
+    global _conf_opts_cache
+    if _conf_opts_cache is not None and not force:
+        return _conf_opts_cache
+    try:
+        r = requests.get(_CONF_PROP_URL, headers=HS, timeout=20)
+        if r.status_code == 200:
+            _conf_opts_cache = [
+                {'value': o.get('value'), 'label': o.get('label'), 'hidden': o.get('hidden', False)}
+                for o in r.json().get('options', [])]
+        else:
+            print(f'[conf] options fetch {r.status_code}', flush=True)
+            _conf_opts_cache = _conf_opts_cache or []
+    except Exception as e:
+        print(f'[conf] options fetch error: {e}', flush=True)
+        _conf_opts_cache = _conf_opts_cache or []
+    return _conf_opts_cache
+
+def hs_add_conference_option(value, label):
+    """Append one option; PATCH the full options array (HubSpot replaces the list).
+    Refreshes the cache on success."""
+    opts = hs_conference_options(force=True)
+    payload = [{'label': o['label'], 'value': o['value'], 'hidden': o.get('hidden', False)}
+               for o in opts if o.get('value')]
+    payload.append({'label': label, 'value': value, 'hidden': False, 'displayOrder': -1})
+    try:
+        r = requests.patch(_CONF_PROP_URL, headers=HS, json={'options': payload}, timeout=30)
+        if r.status_code == 200:
+            hs_conference_options(force=True)
+            return True
+        print(f'[conf] add option {value!r} -> {r.status_code}: {r.text[:200]}', flush=True)
+    except Exception as e:
+        print(f'[conf] add option error {value!r}: {e}', flush=True)
+    return False
+
+
 def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting_type, source_channel,
                      conference_source, notes, owner_id=None, company_id=None, duration_min=30):
     # Build start time. NEVER stamp "now" — a fabricated time is the timeless
