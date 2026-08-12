@@ -36,3 +36,27 @@ def test_norm_option_matches_alias():
     # normalization used for dedup: lowercase alnum, drop underscores
     assert mb._norm_opt("Broker Tech Conference 2026") == mb._norm_opt("broker_tech_conference_2026")
     assert mb._norm_opt("WSIA") != mb._norm_opt("WSIA Dinner")
+
+
+def test_resolve_dedups_to_existing(monkeypatch):
+    monkeypatch.setattr(mb, "client", None)  # force raw fallback
+    monkeypatch.setattr(mb, "hs_conference_options",
+                        lambda force=False: [{"value": "broker_tech_conference_2026",
+                                              "label": "Broker Tech Conference 2026", "hidden": False}])
+    created = []
+    monkeypatch.setattr(mb, "hs_add_conference_option",
+                        lambda v, l: created.append((v, l)) or True)
+    out = mb.resolve_or_create_conference("Broker Tech Conference", "2026-09-01")
+    assert out == {"value": "broker_tech_conference_2026", "created": False,
+                   "label": "Broker Tech Conference 2026"}
+    assert created == []   # dedup hit → no option written
+
+def test_resolve_creates_new(monkeypatch):
+    monkeypatch.setattr(mb, "client", None)
+    monkeypatch.setattr(mb, "hs_conference_options", lambda force=False: [])
+    created = []
+    monkeypatch.setattr(mb, "hs_add_conference_option",
+                        lambda v, l: created.append((v, l)) or True)
+    out = mb.resolve_or_create_conference("BTC", "2026-09-01")
+    assert out == {"value": "btc_2026", "created": True, "label": "BTC 2026"}
+    assert created == [("btc_2026", "BTC 2026")]

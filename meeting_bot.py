@@ -559,6 +559,27 @@ def hs_add_conference_option(value, label):
     return False
 
 
+def resolve_or_create_conference(raw, meeting_date):
+    """Map an unknown conference name to a conference_source value, creating the
+    HubSpot option if genuinely new. Returns {'value','created','label'} or None."""
+    canon = canonicalize_conference(raw, meeting_date)
+    if not canon:
+        return None
+    slug = slugify_conference(canon['name'], canon['year'])
+    if not slug:
+        return None
+    value, label = slug
+    with _conf_opts_lock:
+        want = _norm_opt(value)
+        want_label = _norm_opt(label)
+        for o in hs_conference_options(force=True):   # re-fetch inside lock (race guard)
+            if _norm_opt(o.get('value')) == want or _norm_opt(o.get('label')) == want_label:
+                return {'value': o['value'], 'created': False, 'label': o.get('label') or o['value']}
+        if hs_add_conference_option(value, label):
+            return {'value': value, 'created': True, 'label': label}
+    return None
+
+
 def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting_type, source_channel,
                      conference_source, notes, owner_id=None, company_id=None, duration_min=30):
     # Build start time. NEVER stamp "now" — a fabricated time is the timeless
