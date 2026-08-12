@@ -355,19 +355,18 @@ def canonicalize_conference(raw, meeting_date):
     if not client:
         return {'name': name, 'year': year}
     try:
+        sys_prompt = ("You identify insurance/insurtech industry conferences. "
+                      "Search the web, then reply with ONLY a JSON object: "
+                      '{"name": "<official full name, no year>", "confident": true|false}. '
+                      "Set confident=false if you are not sure the acronym maps to a real event.")
+        msgs = [{'role': 'user',
+                 'content': f'What conference is "{raw}" (an insurance industry event)?'}]
         r = client.messages.create(
-            model='claude-opus-4-8',
-            max_tokens=1024,
+            model='claude-opus-4-8', max_tokens=1024,
             tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
-            system=("You identify insurance/insurtech industry conferences. "
-                    "Search the web, then reply with ONLY a JSON object: "
-                    '{"name": "<official full name, no year>", "confident": true|false}. '
-                    "Set confident=false if you are not sure the acronym maps to a real event."),
-            messages=[{'role': 'user',
-                       'content': f'What conference is "{raw}" (an insurance industry event)?'}],
+            system=sys_prompt, messages=msgs,
         )
         # Server tool loop may pause; re-send up to 3x to let it finish (fixed bound).
-        msgs = [{'role': 'user', 'content': f'What conference is "{raw}"?'}]
         hops = 0
         while r.stop_reason == 'pause_turn' and hops < 3:
             hops += 1
@@ -375,7 +374,7 @@ def canonicalize_conference(raw, meeting_date):
             r = client.messages.create(
                 model='claude-opus-4-8', max_tokens=1024,
                 tools=[{'type': 'web_search_20250305', 'name': 'web_search'}],
-                messages=msgs)
+                system=sys_prompt, messages=msgs)
         text = ''.join(b.text for b in r.content if getattr(b, 'type', '') == 'text')
         mjson = re.search(r'\{.*\}', text, re.S)
         if mjson:
