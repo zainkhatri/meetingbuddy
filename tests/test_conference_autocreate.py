@@ -60,3 +60,20 @@ def test_resolve_creates_new(monkeypatch):
     out = mb.resolve_or_create_conference("BTC", "2026-09-01")
     assert out == {"value": "btc_2026", "created": True, "label": "BTC 2026"}
     assert created == [("btc_2026", "BTC 2026")]
+
+
+def test_add_option_refuses_empty_base(monkeypatch):
+    monkeypatch.setattr(mb, "hs_conference_options", lambda force=False: [])
+    patch_calls = []
+    monkeypatch.setattr(mb.requests, "patch", lambda *a, **kw: patch_calls.append((a, kw)))
+    assert mb.hs_add_conference_option("x_2026", "X 2026") is False
+    assert patch_calls == []
+
+
+def test_slugify_long_name_keeps_year():
+    result = mb.slugify_conference(
+        "International Association of Insurance Supervisors Global Summit", 2026)
+    assert result is not None
+    value, _label = result
+    assert value.endswith("_2026")
+    assert len(value) <= 50

@@ -332,7 +332,8 @@ def slugify_conference(name, year):
     core = re.sub(r'[^a-z0-9]+', '_', clean.lower()).strip('_')
     if not core or core.isdigit():
         return None
-    value = f'{core}_{year}'[:50]
+    core = core[:50 - len(str(year)) - 1].rstrip('_')
+    value = f'{core}_{year}'
     label = f'{clean} {year}'
     return value, label
 
@@ -549,6 +550,10 @@ def hs_add_conference_option(value, label):
     """Append one option; PATCH the full options array (HubSpot replaces the list).
     Refreshes the cache on success."""
     opts = hs_conference_options(force=True)
+    if not opts:
+        # never PATCH an empty base — a failed/empty read would clobber the live options list
+        print('[conf] refusing to add option: options fetch empty/failed', flush=True)
+        return False
     payload = [{'label': o['label'], 'value': o['value'], 'hidden': o.get('hidden', False)}
                for o in opts if o.get('value')]
     payload.append({'label': label, 'value': value, 'hidden': False, 'displayOrder': -1})
