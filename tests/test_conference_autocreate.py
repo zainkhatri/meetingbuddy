@@ -77,3 +77,21 @@ def test_slugify_long_name_keeps_year():
     value, _label = result
     assert value.endswith("_2026")
     assert len(value) <= 50
+
+
+def test_unsure_reply_fires_on_other_and_none():
+    for conf in ('other', None):
+        posts = []
+        mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, conf,
+                               lambda text, thread_ts=None: posts.append((text, thread_ts)), 'ts1')
+        assert posts == [("Not sure what conference that is", 'ts1')]
+
+
+def test_unsure_reply_silent_when_known_or_wrong_context():
+    posts = []
+    say = lambda text, thread_ts=None: posts.append(text)
+    mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, 'tmpaa', say, 'ts')   # known conference
+    mb._maybe_unsure_reply('C_OTHER_CHANNEL', 'other', say, 'ts')                # not the conference channel
+    mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, None, say, None)      # no ts
+    mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, 'other', None, 'ts')  # no say
+    assert posts == []

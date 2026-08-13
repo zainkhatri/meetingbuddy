@@ -914,6 +914,13 @@ def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_tim
         return ''
 
 
+def _maybe_unsure_reply(channel, conf, say, ts):
+    """In the conference channel, when no conference could be identified, reply
+    asking. Live bookings only — sweep/replay pass a silent `say`, which no-ops."""
+    if channel == CONFERENCE_MEETINGS_CHANNEL and conf in (None, 'other') and say and ts:
+        say(text="Not sure what conference that is", thread_ts=ts)
+
+
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
@@ -1062,6 +1069,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
         say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}{deal_suffix}\n{mtg_url}", thread_ts=ts)
+        _maybe_unsure_reply(channel, conf, say, ts)
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no
@@ -1166,6 +1174,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
             f"{mtg_url}"
         )
         say(text=confirmation, thread_ts=ts)
+        _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 
