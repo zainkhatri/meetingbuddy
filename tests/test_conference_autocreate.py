@@ -95,3 +95,54 @@ def test_unsure_reply_silent_when_known_or_wrong_context():
     mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, None, say, None)      # no ts
     mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, 'other', None, 'ts')  # no say
     assert posts == []
+
+
+# --- demo-booked deal creation (ensure_deal) ---
+
+def _stub_deal_calls(monkeypatch, existing_deal=None):
+    """Wire ensure_deal's HubSpot calls to in-memory stubs. Returns a list that
+    captures each hs_create_scheduled_deal invocation."""
+    created = []
+    monkeypatch.setattr(mb, "hs_find_open_deal", lambda cid, contact: existing_deal)
+    def _fake_create(company_name, company_id, company_owner_id, contact_id,
+                     bdr_owner_id, meeting_id, conference_source=None):
+        created.append({"company": company_name, "conf": conference_source,
+                        "owner_in": company_owner_id, "bdr": bdr_owner_id})
+        return "deal123"
+    monkeypatch.setattr(mb, "hs_create_scheduled_deal", _fake_create)
+    return created
+
+
+def test_demo_creates_scheduled_deal(monkeypatch):
+    monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", True)
+    created = _stub_deal_calls(monkeypatch)
+    out = mb.ensure_deal(mb.DEMOS_BOOKED_CHANNEL, None, "Acme Insurance",
+                         "c1", "84250910", "ct1", "88760040", "m1")
+    assert out == " + deal (Scheduled)"
+    assert len(created) == 1 and created[0]["conf"] is None
+
+
+def test_demo_skips_when_open_deal_exists(monkeypatch):
+    monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", True)
+    created = _stub_deal_calls(monkeypatch, existing_deal={"id": "d0"})
+    out = mb.ensure_deal(mb.DEMOS_BOOKED_CHANNEL, None, "Acme Insurance",
+                         "c1", "84250910", "ct1", "88760040", "m1")
+    assert out == "" and created == []
+
+
+def test_demo_skips_when_flag_off(monkeypatch):
+    monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", False)
+    created = _stub_deal_calls(monkeypatch)
+    out = mb.ensure_deal(mb.DEMOS_BOOKED_CHANNEL, None, "Acme Insurance",
+                         "c1", "84250910", "ct1", "88760040", "m1")
+    assert out == "" and created == []
+
+
+def test_conference_still_needs_source_and_flag(monkeypatch):
+    # conference channel, no conference_source -> never creates, regardless of demo flag
+    monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", True)
+    monkeypatch.setattr(mb, "CREATE_CONFERENCE_DEALS", True)
+    created = _stub_deal_calls(monkeypatch)
+    out = mb.ensure_deal(mb.CONFERENCE_MEETINGS_CHANNEL, None, "Acme Insurance",
+                         "c1", "84250910", "ct1", "88760040", "m1")
+    assert out == "" and created == []

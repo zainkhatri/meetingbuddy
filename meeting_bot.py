@@ -52,6 +52,10 @@ HS = {'Authorization': f'Bearer {HS_API_KEY}', 'Content-Type': 'application/json
 # passes (Zain, 2026-06-12). OFF by default; set CREATE_CONFERENCE_DEALS=1 to
 # re-enable. Slack booking confirmations + attribution are unaffected either way.
 CREATE_CONFERENCE_DEALS = os.environ.get('CREATE_CONFERENCE_DEALS', '0') == '1'
+# Demos are higher-intent than conference touches, so #demos-booked bookings DO
+# auto-create a Scheduled-stage deal (Zain, 2026-08-13). Separate switch so it's
+# independent of the conference flag above. Set CREATE_DEMO_DEALS=0 to kill it.
+CREATE_DEMO_DEALS = os.environ.get('CREATE_DEMO_DEALS', '1') == '1'
 
 # --- Channel-driven meeting type (the channel is the authoritative signal) ---
 # Two external Slack channels feed the bot, each meaning a different thing:
@@ -742,15 +746,18 @@ def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
     return did
 
 
-def ensure_conference_deal(conference_source, company_name, company_id,
-                           company_owner_id, contact_id, bdr_owner_id, meeting_id):
-    """Conference booking -> make sure an open deal exists. No-op unless the
-    booking is conference-sourced and names a company; never duplicates an
-    open deal. Returns '' or a suffix for the Slack confirmation."""
-    if not CREATE_CONFERENCE_DEALS:
-        return ''  # deal-creation gated off; Slack booking/attribution unaffected
-    if not conference_source or not company_name:
-        return ''
+def ensure_deal(channel, conference_source, company_name, company_id,
+                company_owner_id, contact_id, bdr_owner_id, meeting_id):
+    """Booking -> make sure an open Scheduled-stage deal exists. Fires for
+    demos (#demos-booked, when CREATE_DEMO_DEALS) and for conference bookings
+    (when CREATE_CONFERENCE_DEALS and a conference is named). Always needs a
+    company; never duplicates an open deal. Returns '' or a Slack suffix."""
+    if channel == DEMOS_BOOKED_CHANNEL:
+        if not CREATE_DEMO_DEALS or not company_name:
+            return ''  # demo deal-creation gated off, or no company to attach to
+    else:
+        if not CREATE_CONFERENCE_DEALS or not conference_source or not company_name:
+            return ''  # conference deal-creation gated off; attribution unaffected
     try:
         if hs_find_open_deal(company_id, contact_id):
             return ''  # a live deal already covers this company
@@ -1061,9 +1068,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
             outcome='SCHEDULED',
         )
         # Conference booking -> make sure a Scheduled-stage deal exists
-        deal_suffix = ensure_conference_deal(conf, company_name, company_id,
-                                             company_owner_id, contact_id,
-                                             owner_id, existing['id'])
+        deal_suffix = ensure_deal(channel, conf, company_name, company_id,
+                                  company_owner_id, contact_id,
+                                  owner_id, existing['id'])
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{existing['id']}"
         prev = existing['sourced_by']
@@ -1138,10 +1145,10 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
     # 5. Conference booking -> make sure a Scheduled-stage deal exists
     deal_suffix = ''
     if mtg and mtg.get('id'):
-        deal_suffix = ensure_conference_deal(parsed.get('conference_source'),
-                                             company_name, company_id,
-                                             company_owner_id, contact_id,
-                                             owner_id, mtg['id'])
+        deal_suffix = ensure_deal(channel, parsed.get('conference_source'),
+                                  company_name, company_id,
+                                  company_owner_id, contact_id,
+                                  owner_id, mtg['id'])
 
     # 6. Push to Ellen's sheet (best-effort)
     sheet_result = ''
