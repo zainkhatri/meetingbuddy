@@ -58,6 +58,11 @@ OWNER_DISPLAY = {
     '92184259': 'Matt',
 }
 
+# Columns the bot re-derives from HubSpot every reconcile — a non-empty new
+# value overwrites the old one. All OTHER columns are fill-empty-only so
+# BDR-curated content (Notes, Follow-Up, AE, etc.) is never clobbered.
+_BOT_OWNED_COLUMNS = ('Conference', 'Meeting Status')
+
 
 def bdr_sdr_owner_value(owner_id):
     """Map a HubSpot owner id to the `sdr_owner` enum display value.
@@ -362,6 +367,28 @@ def _find_row(rows, company, date, contact_name=None, meeting_time=None):
     return None  # genuinely new meeting → append
 
 
+def _merge_existing_row(header_row, current, payload, last_col):
+    """Merge payload into an existing sheet row. Human-curated cells are never
+    overwritten (fill-empty-only); bot-owned columns overwrite when the payload
+    carries a non-empty, different value. Returns (merged_values, any_change)."""
+    merged = []
+    any_change = False
+    for i, h in enumerate(header_row[:last_col]):
+        key = h.strip()
+        new_val = payload.get(key, '')
+        old_val = current[i] if i < len(current) else ''
+        if key in _BOT_OWNED_COLUMNS and new_val and new_val != old_val:
+            merged.append(new_val)
+            any_change = True
+        elif old_val.strip():
+            merged.append(old_val)
+        else:
+            merged.append(new_val)
+            if new_val:
+                any_change = True
+    return merged, any_change
+
+
 def upsert_meeting_row(payload):
     """Insert or update one row in Ellen's sheet.
 
@@ -421,20 +448,9 @@ def upsert_meeting_row(payload):
             log.exception('sheet_sync append failed')
             return {'action': 'error', 'error': str(e)}
 
-    # Update: bot can only FILL empty cells, never overwrite BDR-curated content.
-    # If the existing cell has any value, keep it. Only write to empty cells.
+    # Update: bot-owned columns overwrite; human-curated cells are fill-empty-only.
     current = rows[existing_row - 1] if len(rows) >= existing_row else []
-    merged = []
-    any_change = False
-    for i, h in enumerate(header_row[:last_col]):  # clamped to named columns
-        new_val = payload.get(h.strip(), '')
-        old_val = current[i] if i < len(current) else ''
-        if old_val.strip():
-            merged.append(old_val)
-        else:
-            merged.append(new_val)
-            if new_val:
-                any_change = True
+    merged, any_change = _merge_existing_row(header_row, current, payload, last_col)
     if not any_change:
         return {'action': 'updated', 'row': existing_row, 'noop': True}
 
