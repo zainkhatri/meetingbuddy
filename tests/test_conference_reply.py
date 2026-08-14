@@ -37,3 +37,73 @@ def test_find_meeting_by_booked_at_error(monkeypatch):
         raise RuntimeError('network')
     monkeypatch.setattr(mb.requests, 'post', boom)
     assert mb._find_meeting_by_booked_at('1786662392.092149') is None
+
+
+def _stub_meeting(monkeypatch, meeting):
+    monkeypatch.setattr(mb, '_find_meeting_by_booked_at', lambda ts: meeting)
+
+def _capture_patch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mb.requests, 'patch',
+                        lambda url, headers=None, json=None, timeout=None:
+                            calls.append((url, json)) or _Resp(200, {}))
+    return calls
+
+def _capture_say():
+    said = []
+    def say(text=None, thread_ts=None):
+        said.append(text)
+    return say, said
+
+
+def test_reply_resolves_existing_conf(monkeypatch):
+    _stub_meeting(monkeypatch, {'id': '42', 'conference_source': 'other', 'meeting_date': '2026-08-14'})
+    monkeypatch.setattr(mb, 'detect_conference_from_title', lambda t: 'wsia_uw_summit')
+    monkeypatch.setattr(mb, 'hs_conference_options',
+                        lambda force=False: [{'value': 'wsia_uw_summit', 'label': 'WSIA UW Summit 2026'}])
+    calls = _capture_patch(monkeypatch)
+    say, said = _capture_say()
+    mb._handle_conference_reply('1786662392.092149', 'WSIA', say)
+    assert calls[0][0].endswith('/meetings/42')
+    assert calls[0][1] == {'properties': {'conference_source': 'wsia_uw_summit'}}
+    assert '✓' in said[0] and 'WSIA UW Summit 2026' in said[0]
+
+
+def test_reply_creates_new_conf(monkeypatch):
+    _stub_meeting(monkeypatch, {'id': '7', 'conference_source': None, 'meeting_date': '2026-09-01'})
+    monkeypatch.setattr(mb, 'detect_conference_from_title', lambda t: None)
+    monkeypatch.setattr(mb, 'resolve_or_create_conference',
+                        lambda raw, date: {'value': 'broker_tech_conference_2026',
+                                           'created': True, 'label': 'Broker Tech Conference 2026'})
+    calls = _capture_patch(monkeypatch)
+    say, said = _capture_say()
+    mb._handle_conference_reply('1786662392.092149', 'Broker Tech Conference', say)
+    assert calls[0][1] == {'properties': {'conference_source': 'broker_tech_conference_2026'}}
+    assert 'Broker Tech Conference 2026' in said[0]
+
+
+def test_reply_noop_when_no_meeting(monkeypatch):
+    _stub_meeting(monkeypatch, None)
+    calls = _capture_patch(monkeypatch)
+    say, said = _capture_say()
+    mb._handle_conference_reply('1786662392.092149', 'WSIA', say)
+    assert calls == [] and said == []
+
+
+def test_reply_noop_when_already_tagged(monkeypatch):
+    _stub_meeting(monkeypatch, {'id': '9', 'conference_source': 'tmpaa', 'meeting_date': '2026-08-14'})
+    calls = _capture_patch(monkeypatch)
+    say, said = _capture_say()
+    mb._handle_conference_reply('1786662392.092149', 'WSIA', say)
+    assert calls == [] and said == []
+
+
+def test_reply_unresolved(monkeypatch):
+    _stub_meeting(monkeypatch, {'id': '3', 'conference_source': 'other', 'meeting_date': None})
+    monkeypatch.setattr(mb, 'detect_conference_from_title', lambda t: None)
+    monkeypatch.setattr(mb, 'resolve_or_create_conference', lambda raw, date: None)
+    calls = _capture_patch(monkeypatch)
+    say, said = _capture_say()
+    mb._handle_conference_reply('1786662392.092149', 'asdf', say)
+    assert calls == []
+    assert 'Still couldn\'t identify' in said[0]

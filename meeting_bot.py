@@ -952,6 +952,48 @@ def _find_meeting_by_booked_at(thread_ts):
         return None
 
 
+def _conf_label(value):
+    for o in hs_conference_options():
+        if o.get('value') == value:
+            return o.get('label') or value
+    return value
+
+def _handle_conference_reply(thread_ts, text, say):
+    """A human answered the bot's 'which conference?' question in-thread.
+    Resolve the reply to a conference_source and re-stamp the meeting.
+    Silent no-op if there's no meeting or it already has a real conference."""
+    text = (text or '').strip()
+    if not text:
+        return
+    meeting = _find_meeting_by_booked_at(thread_ts)
+    if not meeting:
+        return
+    if meeting['conference_source'] not in (None, 'other'):
+        return   # already tagged — ignore ordinary thread chatter
+    value = detect_conference_from_title(text)
+    label = _conf_label(value) if value else None
+    if not value:
+        resolved = resolve_or_create_conference(text, meeting.get('meeting_date'))
+        if resolved:
+            value, label = resolved['value'], resolved['label']
+    if not value:
+        if say:
+            say(text=f'Still couldn\'t identify "{text}" — set it in HubSpot manually.',
+                thread_ts=thread_ts)
+        return
+    try:
+        r = requests.patch(
+            f"https://api.hubapi.com/crm/v3/objects/meetings/{meeting['id']}",
+            headers=HS, json={'properties': {'conference_source': value}}, timeout=30)
+        if r.status_code == 200:
+            if say:
+                say(text=f'✓ tagged {label}', thread_ts=thread_ts)
+        else:
+            print(f'[conf-reply] patch {meeting["id"]} -> {r.status_code}: {r.text[:200]}', flush=True)
+    except Exception as e:
+        print(f'[conf-reply] patch error {meeting["id"]}: {e}', flush=True)
+
+
 def _maybe_unsure_reply(channel, conf, say, ts):
     """In the conference channel, when no conference could be identified, reply
     asking. Live bookings only — sweep/replay pass a silent `say`, which no-ops."""
