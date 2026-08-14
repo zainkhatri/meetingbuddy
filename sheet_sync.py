@@ -233,10 +233,16 @@ def build_payload(*, conference_slug, sourced_by_owner_id, meeting_start_ms,
     Caller is responsible for only invoking this when conference_slug is non-empty.
     """
     name = ' '.join(filter(None, [(contact_first or '').strip(), (contact_last or '').strip()]))
+    original_slug = conference_slug
     # Unknown/"other" conference: try inferring from the meeting date
     if conference_slug not in _KNOWN_CONFERENCES:
         conference_slug = _infer_slug_from_date(meeting_start_ms)
     display = CONFERENCE_DISPLAY.get(conference_slug, '') if conference_slug in _KNOWN_CONFERENCES else ''
+    # Auto-created conference: a real slug HubSpot carries (e.g. from
+    # resolve_or_create_conference) that the sheet's display map doesn't know yet.
+    # Humanize the slug so the meeting still lands in Ellen's tracker instead of blank.
+    if not display and original_slug and original_slug != 'other':
+        display = original_slug.replace('_', ' ').title()
     return {
         'Conference': display,
         'Meeting Sourced By': OWNER_DISPLAY.get(str(sourced_by_owner_id or ''), ''),
