@@ -107,3 +107,22 @@ def test_reply_unresolved(monkeypatch):
     mb._handle_conference_reply('1786662392.092149', 'asdf', say)
     assert calls == []
     assert 'Still couldn\'t identify' in said[0]
+
+
+def test_is_conference_reply_true():
+    ev = {'thread_ts': '111.1', 'channel': mb.CONFERENCE_MEETINGS_CHANNEL}
+    assert mb._is_conference_reply(ev, '222.2') is True
+
+def test_is_conference_reply_false_toplevel():
+    # top-level booking post: thread_ts absent
+    ev = {'channel': mb.CONFERENCE_MEETINGS_CHANNEL}
+    assert mb._is_conference_reply(ev, '222.2') is False
+
+def test_is_conference_reply_false_parent_equals_ts():
+    # Slack sets thread_ts == ts on a thread PARENT; that's still a booking, not a reply
+    ev = {'thread_ts': '222.2', 'channel': mb.CONFERENCE_MEETINGS_CHANNEL}
+    assert mb._is_conference_reply(ev, '222.2') is False
+
+def test_is_conference_reply_false_other_channel():
+    ev = {'thread_ts': '111.1', 'channel': 'C_OTHER'}
+    assert mb._is_conference_reply(ev, '222.2') is False

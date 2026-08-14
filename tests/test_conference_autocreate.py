@@ -84,7 +84,7 @@ def test_unsure_reply_fires_on_other_and_none():
         posts = []
         mb._maybe_unsure_reply(mb.CONFERENCE_MEETINGS_CHANNEL, conf,
                                lambda text, thread_ts=None: posts.append((text, thread_ts)), 'ts1')
-        assert posts == [("Not sure what conference that is", 'ts1')]
+        assert posts == [("Not sure what conference that is — reply with the name and I'll tag it.", 'ts1')]
 
 
 def test_unsure_reply_silent_when_known_or_wrong_context():

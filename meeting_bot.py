@@ -813,6 +813,13 @@ def _claim_ts(ts):
         return True
 
 
+def _is_conference_reply(event, ts):
+    """True when a message is a human's thread reply in the conference channel
+    (not a top-level booking post, not a thread parent)."""
+    tt = event.get('thread_ts')
+    return bool(tt) and tt != ts and event.get('channel') == CONFERENCE_MEETINGS_CHANNEL
+
+
 @app.event('message')
 def handle_message(event, client, say, logger):
     # Bot messages: skip
@@ -838,6 +845,9 @@ def handle_message(event, client, say, logger):
         user_id = event.get('user')
         ts = event.get('ts')
     if not text or not ts:
+        return
+    if _is_conference_reply(event, ts):
+        _handle_conference_reply(event['thread_ts'], text, say)
         return
     if not _claim_ts(ts):
         print(f'[live] ts={ts} already claimed (sweep beat us) — skipping')
@@ -998,7 +1008,7 @@ def _maybe_unsure_reply(channel, conf, say, ts):
     """In the conference channel, when no conference could be identified, reply
     asking. Live bookings only — sweep/replay pass a silent `say`, which no-ops."""
     if channel == CONFERENCE_MEETINGS_CHANNEL and conf in (None, 'other') and say and ts:
-        say(text="Not sure what conference that is", thread_ts=ts)
+        say(text="Not sure what conference that is — reply with the name and I'll tag it.", thread_ts=ts)
 
 
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
