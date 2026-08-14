@@ -813,6 +813,13 @@ def _claim_ts(ts):
         return True
 
 
+def _is_conference_reply(event, ts):
+    """True when a message is a human's thread reply in the conference channel
+    (not a top-level booking post, not a thread parent)."""
+    tt = event.get('thread_ts')
+    return bool(tt) and tt != ts and event.get('channel') == CONFERENCE_MEETINGS_CHANNEL
+
+
 @app.event('message')
 def handle_message(event, client, say, logger):
     # Bot messages: skip
@@ -838,6 +845,9 @@ def handle_message(event, client, say, logger):
         user_id = event.get('user')
         ts = event.get('ts')
     if not text or not ts:
+        return
+    if _is_conference_reply(event, ts):
+        _handle_conference_reply(event['thread_ts'], text, say)
         return
     if not _claim_ts(ts):
         print(f'[live] ts={ts} already claimed (sweep beat us) — skipping')
@@ -921,11 +931,84 @@ def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_tim
         return ''
 
 
+def _find_meeting_by_booked_at(thread_ts):
+    """Find the meeting a conference-thread reply belongs to. The reply's
+    thread_ts is the parent booking's ts, and every meeting is stamped with
+    booked_at = that ts in ms. Returns {'id','conference_source','meeting_date'}
+    or None."""
+    try:
+        booked_ms = int(float(thread_ts) * 1000)
+        r = requests.post(
+            'https://api.hubapi.com/crm/v3/objects/meetings/search',
+            headers=HS,
+            json={'filterGroups': [{'filters': [
+                {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
+            ]}],
+                'properties': ['conference_source', 'hs_meeting_start_time'],
+                'limit': 1},
+            timeout=15)
+        if r.status_code != 200 or not r.json().get('results'):
+            return None
+        p = r.json()['results'][0]['properties']
+        meeting_date = None
+        start = p.get('hs_meeting_start_time')
+        if start and str(start).isdigit():
+            meeting_date = datetime.utcfromtimestamp(int(start) / 1000).strftime('%Y-%m-%d')
+        return {'id': r.json()['results'][0]['id'],
+                'conference_source': p.get('conference_source'),
+                'meeting_date': meeting_date}
+    except Exception as e:
+        print(f'[conf-reply] lookup failed for thread {thread_ts}: {e}', flush=True)
+        return None
+
+
+def _conf_label(value):
+    for o in hs_conference_options():
+        if o.get('value') == value:
+            return o.get('label') or value
+    return value
+
+def _handle_conference_reply(thread_ts, text, say):
+    """A human answered the bot's 'which conference?' question in-thread.
+    Resolve the reply to a conference_source and re-stamp the meeting.
+    Silent no-op if there's no meeting or it already has a real conference."""
+    text = (text or '').strip()
+    if not text:
+        return
+    meeting = _find_meeting_by_booked_at(thread_ts)
+    if not meeting:
+        return
+    if meeting['conference_source'] not in (None, 'other'):
+        return   # already tagged — ignore ordinary thread chatter
+    value = detect_conference_from_title(text)
+    label = _conf_label(value) if value else None
+    if not value:
+        resolved = resolve_or_create_conference(text, meeting.get('meeting_date'))
+        if resolved:
+            value, label = resolved['value'], resolved['label']
+    if not value:
+        if say:
+            say(text=f'Still couldn\'t identify "{text}" — set it in HubSpot manually.',
+                thread_ts=thread_ts)
+        return
+    try:
+        r = requests.patch(
+            f"https://api.hubapi.com/crm/v3/objects/meetings/{meeting['id']}",
+            headers=HS, json={'properties': {'conference_source': value}}, timeout=30)
+        if r.status_code == 200:
+            if say:
+                say(text=f'✓ tagged {label}', thread_ts=thread_ts)
+        else:
+            print(f'[conf-reply] patch {meeting["id"]} -> {r.status_code}: {r.text[:200]}', flush=True)
+    except Exception as e:
+        print(f'[conf-reply] patch error {meeting["id"]}: {e}', flush=True)
+
+
 def _maybe_unsure_reply(channel, conf, say, ts):
     """In the conference channel, when no conference could be identified, reply
     asking. Live bookings only — sweep/replay pass a silent `say`, which no-ops."""
     if channel == CONFERENCE_MEETINGS_CHANNEL and conf in (None, 'other') and say and ts:
-        say(text="Not sure what conference that is", thread_ts=ts)
+        say(text="Not sure what conference that is — reply with the name and I'll tag it.", thread_ts=ts)
 
 
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
