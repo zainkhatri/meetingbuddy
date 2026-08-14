@@ -921,6 +921,37 @@ def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_tim
         return ''
 
 
+def _find_meeting_by_booked_at(thread_ts):
+    """Find the meeting a conference-thread reply belongs to. The reply's
+    thread_ts is the parent booking's ts, and every meeting is stamped with
+    booked_at = that ts in ms. Returns {'id','conference_source','meeting_date'}
+    or None."""
+    try:
+        booked_ms = int(float(thread_ts) * 1000)
+        r = requests.post(
+            'https://api.hubapi.com/crm/v3/objects/meetings/search',
+            headers=HS,
+            json={'filterGroups': [{'filters': [
+                {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
+            ]}],
+                'properties': ['conference_source', 'hs_meeting_start_time'],
+                'limit': 1},
+            timeout=15)
+        if r.status_code != 200 or not r.json().get('results'):
+            return None
+        p = r.json()['results'][0]['properties']
+        meeting_date = None
+        start = p.get('hs_meeting_start_time')
+        if start and str(start).isdigit():
+            meeting_date = datetime.utcfromtimestamp(int(start) / 1000).strftime('%Y-%m-%d')
+        return {'id': r.json()['results'][0]['id'],
+                'conference_source': p.get('conference_source'),
+                'meeting_date': meeting_date}
+    except Exception as e:
+        print(f'[conf-reply] lookup failed for thread {thread_ts}: {e}', flush=True)
+        return None
+
+
 def _maybe_unsure_reply(channel, conf, say, ts):
     """In the conference channel, when no conference could be identified, reply
     asking. Live bookings only — sweep/replay pass a silent `say`, which no-ops."""
