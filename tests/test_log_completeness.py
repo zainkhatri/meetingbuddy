@@ -17,8 +17,8 @@ def test_complete_shares_research_and_greets():
     assert 'Thanks <@U123>!' in out
     assert '• Segment: Carrier' in out
     assert '• Size: ~5000 employees' in out
-    assert 'Could you add' not in out          # nothing missing
-    assert 'Nice meeting, Angela!' in out
+    assert "Couldn't find" not in out          # nothing missing
+    assert 'Nice meeting, <@U123>!' in out      # thanks the booker, not the prospect
 
 
 def test_missing_fields_flagged():
@@ -27,7 +27,7 @@ def test_missing_fields_flagged():
     p['location'] = None
     out = mb._log_comment(p, is_conference=True, poster='U1')
     assert '• Segment: Carrier' in out
-    assert 'Could you add to the log: Size, Location?' in out
+    assert "Couldn't find: Size, Location — add if you can." in out
 
 
 def test_no_research_uses_logged_opener_and_flags_missing():
@@ -38,7 +38,7 @@ def test_no_research_uses_logged_opener_and_flags_missing():
     out = mb._log_comment(p, is_conference=False, poster='U1')
     assert 'Logged your meeting with *Acme*.' in out
     assert '• Segment' not in out
-    assert 'Could you add to the log: Segment, Size?' in out
+    assert "Couldn't find: Segment, Size — add if you can." in out
 
 
 def test_no_poster_uses_team():

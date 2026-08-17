@@ -1067,7 +1067,6 @@ def _log_comment(parsed, is_conference, poster=None):
 
     who = f"<@{poster}>" if poster else 'team'
     company = parsed.get('company_name') or 'this one'
-    prospect = (parsed.get('contact_first_name') or '').strip()
     lines = []
     if research:
         lines.append(f"Thanks {who}! 🙌 I did some research on *{company}* — here's a bit more for the meeting:")
@@ -1075,8 +1074,8 @@ def _log_comment(parsed, is_conference, poster=None):
     else:
         lines.append(f"Thanks {who}! 🙌 Logged your meeting with *{company}*.")
     if missing:
-        lines.append("Could you add to the log: " + ', '.join(missing) + "?")
-    lines.append(f"Nice meeting{f', {prospect}' if prospect else ''}! 🎉")
+        lines.append("Couldn't find: " + ', '.join(missing) + " — add if you can.")
+    lines.append(f"Nice meeting, {who}! 🎉")
     return '\n'.join(lines)
 
 
