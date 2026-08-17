@@ -161,6 +161,16 @@ source_channel mapping (be liberal — map anything that's close):
   - Conference platform (Brella, conference name, booth, table) → "conference"
 
 is_booking=true for ANY of: a person's name + company + date/time, headers like "BOOKED" / "DEMO BOOKED" / "MEETING BOOKED", "demo with X", "call with X", "meeting with X" + date. Slack formatting (asterisks, underscores, @mentions) doesn't change the meaning.
+segment: the prospect COMPANY's role in the insurance value chain.
+  - Broker / brokerage / wholesaler / retail broker → "brokerage"
+  - Carrier / insurer / reinsurer / risk-bearer → "carrier"
+  - MGA / MGU / program administrator / program manager / delegated authority → "mga"
+  - If not stated, infer it from what you know about the named company; null only when genuinely unsure.
+
+company_size: the prospect company's employee ("ee") count. Use the number if stated
+(e.g. "Size: 500"). If not stated, give your best estimate for a well-known company
+(a round number or range like "5000" or "1000-5000"); null only when you have no idea.
+
 is_booking=false ONLY for: pure chat, internal coordination, availability questions, FYIs with no new meeting.
 
 When in doubt: is_booking=true. False negatives (missed bookings) are worse than false positives.
@@ -183,6 +193,8 @@ _BOOKING_ITEM = {
         'source_channel':      {'type': ['string', 'null'], 'enum': ['email', 'linkedin', 'referral', 'call', 'conference', 'inbound', None]},
         'conference_source':   {'type': ['string', 'null'], 'enum': ['wsia_uw_summit', 'wsia_dinner', 'insurtech_ny_spring', 'insurtech_insights', 'insurance_innovators', 'tmpaa', 'tmpcc', 'iiusa', 'rims_riskworld', 'nashville_dinner', 'ny_dinner', 'insurance_insider', 'reuters_es', 'reuters_program_managers', 'future_of_insurance', 'insurance_fest', 'other', None]},
         'conference_name_raw': {'type': ['string', 'null']},
+        'segment':             {'type': ['string', 'null'], 'enum': ['brokerage', 'carrier', 'mga', None]},
+        'company_size':        {'type': ['string', 'null'], 'description': 'employee/ee count, e.g. "500" or "10k". Best estimate for well-known companies.'},
         'meeting_date':        {'type': ['string', 'null'], 'description': 'YYYY-MM-DD'},
         'meeting_time_utc':    {'type': ['string', 'null'], 'description': 'HH:MM in UTC'},
         'location':            {'type': ['string', 'null']},
@@ -1011,6 +1023,46 @@ def _maybe_unsure_reply(channel, conf, say, ts):
         say(text="Not sure what conference that is — reply with the name and I'll tag it.", thread_ts=ts)
 
 
+_SEGMENT_LABELS = {'brokerage': 'Brokerage', 'carrier': 'Carrier', 'mga': 'MGA'}
+
+
+def _log_fields(parsed, is_conference):
+    """Aman's meeting-log fields as ordered (label, value) pairs. Segment/Size
+    are Claude-inferred; value is None when a field is still missing."""
+    seg = _SEGMENT_LABELS.get(parsed.get('segment') or '')
+    person = f"{parsed.get('contact_first_name') or ''} {parsed.get('contact_last_name') or ''}".strip()
+    fields = [
+        ('Person', person or None),
+        ('Title', parsed.get('contact_title')),
+        ('Company', parsed.get('company_name')),
+        ('Segment', seg),
+        ('Size', parsed.get('company_size')),
+        ('Date/Time', parsed.get('meeting_date')),
+        ('Source', parsed.get('source_channel')),
+        ('Location', parsed.get('location')),
+    ]
+    if is_conference:
+        conf = parsed.get('conference_source')
+        conf = None if conf in (None, 'other') else conf
+        fields.insert(0, ('Conference', conf or parsed.get('conference_name_raw')))
+    return fields
+
+
+def _log_comment(parsed, is_conference):
+    """Render the completed meeting-log block for a thread comment, filling what
+    Claude inferred and marking anything still missing for the BDR to add.
+
+    Slack bots can't edit a human's message, so this is posted as a comment on
+    the post rather than edited into it."""
+    fields = _log_fields(parsed, is_conference)
+    lines = ['📋 *Meeting log*']
+    lines += [f"{label}: {val}" if val else f"{label}: ⚠️ _add_" for label, val in fields]
+    missing = [label for label, val in fields if not val]
+    if missing:
+        lines.append("Please add: " + ', '.join(missing))
+    return '\n'.join(lines)
+
+
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
@@ -1159,6 +1211,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
         say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}{deal_suffix}\n{mtg_url}", thread_ts=ts)
+        say(text=_log_comment(parsed, bool(profile.get('is_conference'))), thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
         return
 
@@ -1264,6 +1317,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
             f"{mtg_url}"
         )
         say(text=confirmation, thread_ts=ts)
+        say(text=_log_comment(parsed, bool(profile.get('is_conference'))), thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
