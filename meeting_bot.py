@@ -901,7 +901,7 @@ def handle_message(event, client, say, logger):
     print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
     _random_react(client, channel, ts, count=3)
     for parsed in bookings:
-        _process_booking(parsed, text, owner_id, ts, client, say, channel=channel)
+        _process_booking(parsed, text, owner_id, ts, client, say, channel=channel, poster=user_id)
 
 
 def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_time_utc,
@@ -1048,19 +1048,39 @@ def _log_fields(parsed, is_conference):
     return fields
 
 
-def _log_comment(parsed, is_conference):
-    """Flag only the meeting-log fields still missing, for a thread comment.
-    Returns '' when nothing is missing (caller then posts no comment).
+def _log_comment(parsed, is_conference, poster=None):
+    """Friendly thread comment: share the info the bot researched (Segment/Size)
+    and flag any meeting-log fields still missing. Returns '' when there's
+    nothing to add. `poster` is the booker's Slack user id (for @mention).
 
     Slack bots can't edit a human's message, so this is posted as a comment on
     the post rather than edited into it."""
+    research = []
+    seg = _SEGMENT_LABELS.get(parsed.get('segment') or '')
+    if seg:
+        research.append(f"• Segment: {seg}")
+    if parsed.get('company_size'):
+        research.append(f"• Size: ~{parsed['company_size']} employees")
     missing = [label for label, val in _log_fields(parsed, is_conference) if not val]
-    if not missing:
+    if not research and not missing:
         return ''
-    return "📋 Missing from the meeting log — please add: " + ', '.join(missing)
+
+    who = f"<@{poster}>" if poster else 'team'
+    company = parsed.get('company_name') or 'this one'
+    prospect = (parsed.get('contact_first_name') or '').strip()
+    lines = []
+    if research:
+        lines.append(f"Thanks {who}! 🙌 I did some research on *{company}* — here's a bit more for the meeting:")
+        lines += research
+    else:
+        lines.append(f"Thanks {who}! 🙌 Logged your meeting with *{company}*.")
+    if missing:
+        lines.append("Could you add to the log: " + ', '.join(missing) + "?")
+    lines.append(f"Nice meeting{f', {prospect}' if prospect else ''}! 🎉")
+    return '\n'.join(lines)
 
 
-def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
+def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, poster=None):
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
     last = parsed.get('contact_last_name')
@@ -1208,9 +1228,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
         say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}{deal_suffix}\n{mtg_url}", thread_ts=ts)
-        _missing = _log_comment(parsed, bool(profile.get('is_conference')))
-        if _missing:
-            say(text=_missing, thread_ts=ts)
+        _note = _log_comment(parsed, bool(profile.get('is_conference')), poster)
+        if _note:
+            say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
         return
 
@@ -1316,9 +1336,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
             f"{mtg_url}"
         )
         say(text=confirmation, thread_ts=ts)
-        missing_notice = _log_comment(parsed, bool(profile.get('is_conference')))
-        if missing_notice:
-            say(text=missing_notice, thread_ts=ts)
+        note = _log_comment(parsed, bool(profile.get('is_conference')), poster)
+        if note:
+            say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
