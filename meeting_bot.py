@@ -1049,18 +1049,15 @@ def _log_fields(parsed, is_conference):
 
 
 def _log_comment(parsed, is_conference):
-    """Render the completed meeting-log block for a thread comment, filling what
-    Claude inferred and marking anything still missing for the BDR to add.
+    """Flag only the meeting-log fields still missing, for a thread comment.
+    Returns '' when nothing is missing (caller then posts no comment).
 
     Slack bots can't edit a human's message, so this is posted as a comment on
     the post rather than edited into it."""
-    fields = _log_fields(parsed, is_conference)
-    lines = ['📋 *Meeting log*']
-    lines += [f"{label}: {val}" if val else f"{label}: ⚠️ _add_" for label, val in fields]
-    missing = [label for label, val in fields if not val]
-    if missing:
-        lines.append("Please add: " + ', '.join(missing))
-    return '\n'.join(lines)
+    missing = [label for label, val in _log_fields(parsed, is_conference) if not val]
+    if not missing:
+        return ''
+    return "📋 Missing from the meeting log — please add: " + ', '.join(missing)
 
 
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
@@ -1211,7 +1208,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
         say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}{deal_suffix}\n{mtg_url}", thread_ts=ts)
-        say(text=_log_comment(parsed, bool(profile.get('is_conference'))), thread_ts=ts)
+        _missing = _log_comment(parsed, bool(profile.get('is_conference')))
+        if _missing:
+            say(text=_missing, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
         return
 
@@ -1317,7 +1316,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None):
             f"{mtg_url}"
         )
         say(text=confirmation, thread_ts=ts)
-        say(text=_log_comment(parsed, bool(profile.get('is_conference'))), thread_ts=ts)
+        missing_notice = _log_comment(parsed, bool(profile.get('is_conference')))
+        if missing_notice:
+            say(text=missing_notice, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
