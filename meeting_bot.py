@@ -659,9 +659,8 @@ DEAL_STAGE_SCHEDULED = '3541233368'
 # create a second one. (Same list scheduled_deal_sync.py uses.)
 DEAL_OPEN_STAGES = ['3541233368', '1034884191', 'appointmentscheduled',
                     'qualifiedtobuy', 'decisionmakerboughtin', 'contractsent']
-# Deals are ALWAYS owned by an AE, never a BDR (per Zain 2026-06-05).
-# Each BDR's bookings roll up to their AE:
 # Real AEs — the only owners a demo deal may land on (mirrors route_meeting_deals.AE_IDS).
+# The reconciliation cron finalizes the owner from the AE on the synced calendar invite.
 AE_IDS = {'163071452', '96605305', '162894707', '84250910', '165453251',
           '166089614', '165453250', '654909503', '164601691'}
 UNASSIGNED = '166833455'   # Unassigned Territory
