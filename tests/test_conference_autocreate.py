@@ -145,3 +145,14 @@ def test_conference_never_creates_deal(monkeypatch):
     out = mb.ensure_deal(mb.CONFERENCE_MEETINGS_CHANNEL, "insurtech_insights",
                          "Acme Insurance", "c1", "84250910", "ct1", "88760040", "m1")
     assert out == "" and created == []
+
+
+def test_demo_deal_owner_keeps_real_ae():
+    assert mb.demo_deal_owner("84250910") == "84250910"   # Nia (AE) stays
+    assert mb.demo_deal_owner("163071452") == "163071452"  # Gavin (AE) stays
+
+def test_demo_deal_owner_unassigns_non_ae():
+    assert mb.demo_deal_owner("162210484") == mb.UNASSIGNED  # Jacob (BDR) -> Unassigned
+    assert mb.demo_deal_owner("92184259") == mb.UNASSIGNED    # Matt Stapleton (BDR)
+    assert mb.demo_deal_owner("164069740") == mb.UNASSIGNED   # DQ queue
+    assert mb.demo_deal_owner("") == mb.UNASSIGNED            # no owner

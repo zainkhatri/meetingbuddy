@@ -661,23 +661,20 @@ DEAL_OPEN_STAGES = ['3541233368', '1034884191', 'appointmentscheduled',
                     'qualifiedtobuy', 'decisionmakerboughtin', 'contractsent']
 # Deals are ALWAYS owned by an AE, never a BDR (per Zain 2026-06-05).
 # Each BDR's bookings roll up to their AE:
-BDR_TO_AE = {
-    '88760040': '84250910',    # Zain        -> Nia
-    '164943105': '84250910',   # Ben Trotter -> Nia
-    '162210484': '163071452',  # Jacob       -> Gavin
-    '82377567': '163071452',   # Dani        -> Gavin
-    '92184259': '162894707',   # Matt        -> Mike
-}
-DQ_QUEUE_OWNER = '164069740'   # "Disqualified Queue" — never a deal owner
-AE_FALLBACK = '654909503'      # Aman — when no company AE and no BDR mapping
-def deal_owner_for(company_owner_id, bdr_owner_id):
-    """Resolve who owns a conference deal: the company's AE when the company
-    owner is a real AE; otherwise the booking BDR's AE (BDR_TO_AE); else Aman.
-    A BDR or the Disqualified Queue is never returned."""
-    if (company_owner_id and company_owner_id not in BDR_TO_AE
-            and company_owner_id != DQ_QUEUE_OWNER):
+# Real AEs — the only owners a demo deal may land on (mirrors route_meeting_deals.AE_IDS).
+AE_IDS = {'163071452', '96605305', '162894707', '84250910', '165453251',
+          '166089614', '165453250', '654909503', '164601691'}
+UNASSIGNED = '166833455'   # Unassigned Territory
+
+
+def demo_deal_owner(company_owner_id):
+    """Provisional owner for a demo deal: the company's AE when the account is
+    already owned by a real AE; otherwise Unassigned Territory. The AE-on-the-
+    meeting reconciliation cron finalizes the owner from the synced invite.
+    A BDR / DQ queue / blank is never returned as the owner."""
+    if company_owner_id in AE_IDS:
         return company_owner_id
-    return BDR_TO_AE.get(bdr_owner_id or '') or AE_FALLBACK
+    return UNASSIGNED
 
 
 def hs_find_open_deal(company_id, contact_id):
@@ -706,12 +703,12 @@ def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
                              contact_id, bdr_owner_id, meeting_id):
     """Create a Scheduled-stage deal for a demo booking and associate
     meeting/contact/company. Deal owner = an AE, never a BDR (see
-    deal_owner_for); sourced_by = the booking BDR. Returns deal id or None."""
+    demo_deal_owner); sourced_by = the booking BDR. Returns deal id or None."""
     props = {
         'dealname': f'{company_name} - Intro Calls',
         'pipeline': DEAL_PIPELINE,
         'dealstage': DEAL_STAGE_SCHEDULED,
-        'hubspot_owner_id': deal_owner_for(company_owner_id, bdr_owner_id),
+        'hubspot_owner_id': demo_deal_owner(company_owner_id),
     }
     if bdr_owner_id:
         props['sourced_by'] = bdr_owner_id
