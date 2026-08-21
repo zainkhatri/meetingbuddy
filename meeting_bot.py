@@ -47,11 +47,6 @@ ANTHROPIC_API_KEY = os.environ['ANTHROPIC_API_KEY']
 HS_API_KEY = os.environ['HS_API_KEY']
 HS = {'Authorization': f'Bearer {HS_API_KEY}', 'Content-Type': 'application/json'}
 
-# Conference bookings used to auto-create a Scheduled-stage deal each. That
-# clutters the Scheduled board with deals that never advance after the meeting
-# passes (Zain, 2026-06-12). OFF by default; set CREATE_CONFERENCE_DEALS=1 to
-# re-enable. Slack booking confirmations + attribution are unaffected either way.
-CREATE_CONFERENCE_DEALS = os.environ.get('CREATE_CONFERENCE_DEALS', '0') == '1'
 # Demos are higher-intent than conference touches, so #demos-booked bookings DO
 # auto-create a Scheduled-stage deal (Zain, 2026-08-13). Separate switch so it's
 # independent of the conference flag above. Set CREATE_DEMO_DEALS=0 to kill it.
@@ -675,18 +670,6 @@ BDR_TO_AE = {
 }
 DQ_QUEUE_OWNER = '164069740'   # "Disqualified Queue" — never a deal owner
 AE_FALLBACK = '654909503'      # Aman — when no company AE and no BDR mapping
-# conference_source slug -> deals.lead_source_activity dropdown option.
-# Only slugs with an EXACT existing option are mapped — an unknown enum value
-# makes the whole deal-create 400. Unmapped slugs still get lead_source.
-CONF_TO_LEAD_ACTIVITY = {
-    'insurtech_insights': 'Insurtech Insights',
-    'insurance_innovators': 'Insurance Innovators',
-    'tmpaa': 'TMPAA',
-    'reuters_es': 'Reuters - The Insurer E&S',
-    'reuters_program_managers': 'Reuters - The Insurer Program Manager',
-}
-
-
 def deal_owner_for(company_owner_id, bdr_owner_id):
     """Resolve who owns a conference deal: the company's AE when the company
     owner is a real AE; otherwise the booking BDR's AE (BDR_TO_AE); else Aman.
@@ -720,23 +703,16 @@ def hs_find_open_deal(company_id, contact_id):
 
 
 def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
-                             contact_id, bdr_owner_id, meeting_id,
-                             conference_source=None):
-    """Create a Scheduled-stage deal for a conference booking and associate
+                             contact_id, bdr_owner_id, meeting_id):
+    """Create a Scheduled-stage deal for a demo booking and associate
     meeting/contact/company. Deal owner = an AE, never a BDR (see
-    deal_owner_for); sourced_by = the booking BDR; lead_source/-activity mark
-    which conference produced it. Returns deal id or None."""
+    deal_owner_for); sourced_by = the booking BDR. Returns deal id or None."""
     props = {
         'dealname': f'{company_name} - Intro Calls',
         'pipeline': DEAL_PIPELINE,
         'dealstage': DEAL_STAGE_SCHEDULED,
         'hubspot_owner_id': deal_owner_for(company_owner_id, bdr_owner_id),
     }
-    if conference_source:
-        props['lead_source'] = 'Conference'
-        activity = CONF_TO_LEAD_ACTIVITY.get(conference_source)
-        if activity:
-            props['lead_source_activity'] = activity
     if bdr_owner_id:
         props['sourced_by'] = bdr_owner_id
     r = requests.post('https://api.hubapi.com/crm/v3/objects/deals',
@@ -761,21 +737,18 @@ def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
 def ensure_deal(channel, conference_source, company_name, company_id,
                 company_owner_id, contact_id, bdr_owner_id, meeting_id):
     """Booking -> make sure an open Scheduled-stage deal exists. Fires for
-    demos (#demos-booked, when CREATE_DEMO_DEALS) and for conference bookings
-    (when CREATE_CONFERENCE_DEALS and a conference is named). Always needs a
-    company; never duplicates an open deal. Returns '' or a Slack suffix."""
-    if channel == DEMOS_BOOKED_CHANNEL:
-        if not CREATE_DEMO_DEALS or not company_name:
-            return ''  # demo deal-creation gated off, or no company to attach to
-    else:
-        if not CREATE_CONFERENCE_DEALS or not conference_source or not company_name:
-            return ''  # conference deal-creation gated off; attribution unaffected
+    demos (#demos-booked, when CREATE_DEMO_DEALS) only. Conference bookings
+    never create a deal (Gavin, 2026-08-21). Always needs a company; never
+    duplicates an open deal. Returns '' or a Slack suffix."""
+    if channel != DEMOS_BOOKED_CHANNEL:
+        return ''  # conference bookings never create a deal (Gavin, 2026-08-21)
+    if not CREATE_DEMO_DEALS or not company_name:
+        return ''  # demo deal-creation gated off, or no company to attach to
     try:
         if hs_find_open_deal(company_id, contact_id):
             return ''  # a live deal already covers this company
         did = hs_create_scheduled_deal(company_name, company_id, company_owner_id,
-                                       contact_id, bdr_owner_id, meeting_id,
-                                       conference_source=conference_source)
+                                       contact_id, bdr_owner_id, meeting_id)
         if did:
             print(f'[deal] created Scheduled deal {did} for {company_name} (mtg {meeting_id})')
             return ' + deal (Scheduled)'
