@@ -104,10 +104,9 @@ def _stub_deal_calls(monkeypatch, existing_deal=None):
     captures each hs_create_scheduled_deal invocation."""
     created = []
     monkeypatch.setattr(mb, "hs_find_open_deal", lambda cid, contact: existing_deal)
-    def _fake_create(company_name, company_id, company_owner_id, contact_id,
+    def _fake_create(company_name, company_id, contact_id,
                      bdr_owner_id, meeting_id):
-        created.append({"company": company_name, "owner_in": company_owner_id,
-                        "bdr": bdr_owner_id})
+        created.append({"company": company_name, "bdr": bdr_owner_id})
         return "deal123"
     monkeypatch.setattr(mb, "hs_create_scheduled_deal", _fake_create)
     return created
@@ -117,7 +116,7 @@ def test_demo_creates_scheduled_deal(monkeypatch):
     monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", True)
     created = _stub_deal_calls(monkeypatch)
     out = mb.ensure_deal(mb.DEMOS_BOOKED_CHANNEL, None, "Acme Insurance",
-                         "c1", "84250910", "ct1", "88760040", "m1")
+                         "c1", "ct1", "88760040", "m1")
     assert out == " + deal (Scheduled)"
     assert len(created) == 1
 
@@ -126,7 +125,7 @@ def test_demo_skips_when_open_deal_exists(monkeypatch):
     monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", True)
     created = _stub_deal_calls(monkeypatch, existing_deal={"id": "d0"})
     out = mb.ensure_deal(mb.DEMOS_BOOKED_CHANNEL, None, "Acme Insurance",
-                         "c1", "84250910", "ct1", "88760040", "m1")
+                         "c1", "ct1", "88760040", "m1")
     assert out == "" and created == []
 
 
@@ -134,7 +133,7 @@ def test_demo_skips_when_flag_off(monkeypatch):
     monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", False)
     created = _stub_deal_calls(monkeypatch)
     out = mb.ensure_deal(mb.DEMOS_BOOKED_CHANNEL, None, "Acme Insurance",
-                         "c1", "84250910", "ct1", "88760040", "m1")
+                         "c1", "ct1", "88760040", "m1")
     assert out == "" and created == []
 
 
@@ -143,16 +142,12 @@ def test_conference_never_creates_deal(monkeypatch):
     monkeypatch.setattr(mb, "CREATE_DEMO_DEALS", True)
     created = _stub_deal_calls(monkeypatch)
     out = mb.ensure_deal(mb.CONFERENCE_MEETINGS_CHANNEL, "insurtech_insights",
-                         "Acme Insurance", "c1", "84250910", "ct1", "88760040", "m1")
+                         "Acme Insurance", "c1", "ct1", "88760040", "m1")
     assert out == "" and created == []
 
 
-def test_demo_deal_owner_keeps_real_ae():
-    assert mb.demo_deal_owner("84250910") == "84250910"   # Nia (AE) stays
-    assert mb.demo_deal_owner("163071452") == "163071452"  # Gavin (AE) stays
-
-def test_demo_deal_owner_unassigns_non_ae():
-    assert mb.demo_deal_owner("162210484") == mb.UNASSIGNED  # Jacob (BDR) -> Unassigned
-    assert mb.demo_deal_owner("92184259") == mb.UNASSIGNED    # Matt Stapleton (BDR)
-    assert mb.demo_deal_owner("164069740") == mb.UNASSIGNED   # DQ queue
-    assert mb.demo_deal_owner("") == mb.UNASSIGNED            # no owner
+def test_demo_deal_owner_always_unassigned():
+    # Booking time: the calendar invite has not synced yet, so a demo deal is
+    # ALWAYS created in Unassigned Territory. route_meeting_deals assigns the AE
+    # later, only if that AE is on the synced invite. (Changed 2026-08-29 — Gavin.)
+    assert mb.demo_deal_owner() == mb.UNASSIGNED

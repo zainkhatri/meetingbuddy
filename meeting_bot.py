@@ -666,13 +666,14 @@ AE_IDS = {'163071452', '96605305', '162894707', '84250910', '165453251',
 UNASSIGNED = '166833455'   # Unassigned Territory
 
 
-def demo_deal_owner(company_owner_id):
-    """Provisional owner for a demo deal: the company's AE when the account is
-    already owned by a real AE; otherwise Unassigned Territory. The AE-on-the-
-    meeting reconciliation cron finalizes the owner from the synced invite.
-    A BDR / DQ queue / blank is never returned as the owner."""
-    if company_owner_id in AE_IDS:
-        return company_owner_id
+def demo_deal_owner():
+    """Provisional owner for a freshly-booked demo deal: ALWAYS Unassigned
+    Territory. At booking time the calendar invite has not synced yet, so we
+    cannot know which AE (if any) is on the call. route_meeting_deals is the
+    single source of truth — it assigns the AE once, and only if, that AE is on
+    the synced invite; otherwise the deal stays in Unassigned for triage.
+    (Changed 2026-08-29: previously stamped the account's AE, which dropped
+    BDR-booked demos onto AEs who were never on the call — Gavin's report.)"""
     return UNASSIGNED
 
 
@@ -698,7 +699,7 @@ def hs_find_open_deal(company_id, contact_id):
     return None
 
 
-def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
+def hs_create_scheduled_deal(company_name, company_id,
                              contact_id, bdr_owner_id, meeting_id):
     """Create a Scheduled-stage deal for a demo booking and associate
     meeting/contact/company. Deal owner = an AE, never a BDR (see
@@ -707,7 +708,7 @@ def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
         'dealname': f'{company_name} - Intro Calls',
         'pipeline': DEAL_PIPELINE,
         'dealstage': DEAL_STAGE_SCHEDULED,
-        'hubspot_owner_id': demo_deal_owner(company_owner_id),
+        'hubspot_owner_id': demo_deal_owner(),
     }
     if bdr_owner_id:
         props['sourced_by'] = bdr_owner_id
@@ -731,7 +732,7 @@ def hs_create_scheduled_deal(company_name, company_id, company_owner_id,
 
 
 def ensure_deal(channel, conference_source, company_name, company_id,
-                company_owner_id, contact_id, bdr_owner_id, meeting_id):
+                contact_id, bdr_owner_id, meeting_id):
     """Booking -> make sure an open Scheduled-stage deal exists. Fires for
     demos (#demos-booked, when CREATE_DEMO_DEALS) only. Conference bookings
     never create a deal (Gavin, 2026-08-21). Always needs a company; never
@@ -743,7 +744,7 @@ def ensure_deal(channel, conference_source, company_name, company_id,
     try:
         if hs_find_open_deal(company_id, contact_id):
             return ''  # a live deal already covers this company
-        did = hs_create_scheduled_deal(company_name, company_id, company_owner_id,
+        did = hs_create_scheduled_deal(company_name, company_id,
                                        contact_id, bdr_owner_id, meeting_id)
         if did:
             print(f'[deal] created Scheduled deal {did} for {company_name} (mtg {meeting_id})')
@@ -1101,8 +1102,6 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
     # 1. Find or create company
     co = hs_find_company(company_name) if company_name else None
     company_id = co['id'] if co else None
-    # Company owner = the AE; conference deals get assigned to them.
-    company_owner_id = (co.get('properties') or {}).get('hubspot_owner_id') if co else None
 
     # 2. Find or create contact (company disambiguates same-name collisions)
     contact = hs_find_contact(first, last, email, company_name)
@@ -1189,8 +1188,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         )
         # Conference booking -> make sure a Scheduled-stage deal exists
         deal_suffix = ensure_deal(channel, conf, company_name, company_id,
-                                  company_owner_id, contact_id,
-                                  owner_id, existing['id'])
+                                  contact_id, owner_id, existing['id'])
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{existing['id']}"
         prev = existing['sourced_by']
@@ -1270,8 +1268,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
     if mtg and mtg.get('id'):
         deal_suffix = ensure_deal(channel, parsed.get('conference_source'),
                                   company_name, company_id,
-                                  company_owner_id, contact_id,
-                                  owner_id, mtg['id'])
+                                  contact_id, owner_id, mtg['id'])
 
     # 6. Push to Ellen's sheet (best-effort)
     sheet_result = ''
