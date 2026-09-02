@@ -1004,6 +1004,18 @@ def hs_company_history(company_id):
     except Exception:
         pass
 
+    # Comprehensive brief: prior content -> Claude summary + participants + last touch
+    content = _gather_account_content(company_id)
+    summary = _summarize_account(content['meetings'], content['notes'], content['emails'])
+    if summary:
+        h['summary'] = summary
+    parts = _account_participants(content['meetings'], content['emails'])
+    if parts:
+        h['participants'] = parts
+    lt = _last_touch(content, h.get('last_activity_date'))
+    if lt:
+        h['last_touch'] = lt
+
     return h or None
 
 

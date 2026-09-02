@@ -90,3 +90,46 @@ def test_comment_unchanged_without_history():
     with_none = meeting_bot._log_comment(parsed, False, poster='U1', history=None)
     assert base == with_none
     assert 'spoken to' not in base
+
+
+def test_history_includes_summary_and_participants(monkeypatch):
+    # search endpoints: meetings/deals/contacts/notes/emails; batch reads; company GET
+    def fake_post(url, headers=None, json=None, timeout=None):
+        if 'meetings/search' in url:
+            return _Resp(200, {'total': 2, 'results': [{'id': 'M1', 'properties':
+                {'hs_meeting_title': 'Intro', 'hs_meeting_start_time': '2026-06-14T10:00:00Z',
+                 'hs_meeting_body': 'claims automation'}}]})
+        if 'deals/search' in url:
+            return _Resp(200, {'total': 0, 'results': []})
+        if 'contacts/search' in url:
+            return _Resp(200, {'total': 5, 'results': []})
+        if 'notes/search' in url:
+            return _Resp(200, {'results': []})
+        if 'emails/search' in url:
+            return _Resp(200, {'results': []})
+        if 'associations/meetings/contacts/batch/read' in url:
+            return _Resp(200, {'results': [{'from': {'id': 'M1'}, 'to': [{'toObjectId': 101}]}]})
+        if 'associations/emails/contacts/batch/read' in url:
+            return _Resp(200, {'results': []})
+        if 'contacts/batch/read' in url:
+            return _Resp(200, {'results': [{'id': '101', 'properties':
+                {'firstname': 'Jane', 'lastname': 'Doe', 'jobtitle': 'VP Ops'}}]})
+        raise AssertionError(url)
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return _Resp(200, {'properties': {'hubspot_owner_id': '162210484',
+                                          'hs_last_activity_date': '2026-05-01T00:00:00Z'}})
+    class FakeMessages:
+        def create(self, **kw):
+            return type('M', (), {'content': [type('B', (), {'type': 'text',
+                'text': 'One intro call on claims automation.'})()]})()
+    monkeypatch.setattr(meeting_bot.requests, 'post', fake_post)
+    monkeypatch.setattr(meeting_bot.requests, 'get', fake_get)
+    monkeypatch.setattr(meeting_bot, 'client', type('C', (), {'messages': FakeMessages()})())
+
+    h = meeting_bot.hs_company_history('C1')
+    assert h['summary'] == 'One intro call on claims automation.'
+    assert h['participants'] == [{'name': 'Jane Doe', 'title': 'VP Ops'}]
+    assert h['last_touch'] == {'type': 'meeting', 'date': '2026-06-14'}
+    # existing keys still present
+    assert h['meetings_count'] == 2
+    assert h['contacts_count'] == 5
