@@ -44,3 +44,38 @@ def test_gather_account_content_three_sources(monkeypatch):
     assert c['meetings'][0]['id'] == 'M1'
     assert c['notes'][0]['hs_note_body'] == 'called'
     assert c['emails'][0]['hs_email_subject'] == 'Re: pricing'
+
+
+def test_account_participants_resolves_names(monkeypatch):
+    def fake_post(url, headers=None, json=None, timeout=None):
+        if 'associations/meetings/contacts/batch/read' in url:
+            return _Resp(200, {'results': [{'from': {'id': 'M1'}, 'to': [{'toObjectId': 101}]}]})
+        if 'associations/emails/contacts/batch/read' in url:
+            return _Resp(200, {'results': [{'from': {'id': 'E1'}, 'to': [{'toObjectId': 102}]}]})
+        if 'contacts/batch/read' in url:
+            ids = {i['id'] for i in json['inputs']}
+            assert ids == {'101', '102'}
+            return _Resp(200, {'results': [
+                {'id': '101', 'properties': {'firstname': 'Jane', 'lastname': 'Doe', 'jobtitle': 'VP Ops'}},
+                {'id': '102', 'properties': {'firstname': 'Mark', 'lastname': 'Lee', 'jobtitle': None}},
+            ]})
+        raise AssertionError(url)
+    monkeypatch.setattr(meeting_bot.requests, 'post', fake_post)
+    out = meeting_bot._account_participants([{'id': 'M1'}], [{'id': 'E1'}])
+    names = {p['name']: p['title'] for p in out}
+    assert names == {'Jane Doe': 'VP Ops', 'Mark Lee': None}
+
+
+def test_account_participants_degrades(monkeypatch):
+    monkeypatch.setattr(meeting_bot.requests, 'post', lambda *a, **k: _Resp(500, {}))
+    assert meeting_bot._account_participants([{'id': 'M1'}], []) == []
+
+
+def test_contacts_display_caps_at_six(monkeypatch):
+    captured = {}
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured['n'] = len(json['inputs'])
+        return _Resp(200, {'results': []})
+    monkeypatch.setattr(meeting_bot.requests, 'post', fake_post)
+    meeting_bot._contacts_display([str(i) for i in range(20)])
+    assert captured['n'] == 6

@@ -839,6 +839,56 @@ def _gather_account_content(company_id):
     }
 
 
+def _assoc_contact_ids(obj, obj_ids):
+    """Contact ids associated with the given meeting/email ids via a v4 batch
+    read. set() on failure — a degraded sub-read."""
+    ids = set()
+    if not obj_ids:
+        return ids
+    try:
+        r = requests.post(f'https://api.hubapi.com/crm/v4/associations/{obj}/contacts/batch/read',
+                          headers=HS, json={'inputs': [{'id': str(i)} for i in obj_ids]}, timeout=30)
+        if r.status_code == 200:
+            for res in r.json().get('results', []):
+                for to in res.get('to', []):
+                    tid = to.get('toObjectId')
+                    if tid is not None:
+                        ids.add(str(tid))
+    except Exception:
+        pass
+    return ids
+
+
+def _contacts_display(contact_ids):
+    """[{'name','title'}] for up to 6 contact ids via a v3 batch read. [] on
+    empty/failure."""
+    ids = list(contact_ids)[:6]
+    if not ids:
+        return []
+    try:
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/contacts/batch/read',
+                          headers=HS, json={'properties': ['firstname', 'lastname', 'jobtitle'],
+                                            'inputs': [{'id': i} for i in ids]}, timeout=30)
+        if r.status_code == 200:
+            out = []
+            for c in r.json().get('results', []):
+                p = c.get('properties') or {}
+                name = f"{p.get('firstname') or ''} {p.get('lastname') or ''}".strip()
+                if name:
+                    out.append({'name': name, 'title': p.get('jobtitle') or None})
+            return out
+    except Exception:
+        pass
+    return []
+
+
+def _account_participants(meetings, emails):
+    """Distinct meeting/email participant contacts (name + title), capped at 6."""
+    ids = _assoc_contact_ids('meetings', [m['id'] for m in meetings if m.get('id')])
+    ids |= _assoc_contact_ids('emails', [e['id'] for e in emails if e.get('id')])
+    return _contacts_display(ids)
+
+
 def _day(ts):
     """'2026-06-14T10:00:00Z' -> '2026-06-14'. None-safe."""
     return ts[:10] if ts else None
