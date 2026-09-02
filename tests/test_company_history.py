@@ -67,3 +67,25 @@ def test_all_empty_returns_none(monkeypatch):
              contacts={'total': 0, 'results': []},
              company={'properties': {}})
     assert meeting_bot.hs_company_history('C1', 'K1') is None
+
+
+def test_comment_renders_history_block():
+    parsed = {'company_name': 'Acme', 'segment': 'brokerage', 'company_size': 2000}
+    history = {'meetings_count': 3, 'last_meeting_date': '2026-06-14',
+               'deal': {'name': 'Acme - Intro Calls', 'stage': 'appointmentscheduled',
+                        'amount': '40000', 'open': True},
+               'contacts_count': 5, 'owner_name': 'jacob', 'last_activity_date': '2026-08-20'}
+    out = meeting_bot._log_comment(parsed, False, poster='U1', history=history)
+    assert 'spoken to' in out
+    assert '3 prior meetings (last: 2026-06-14)' in out
+    assert 'Acme - Intro Calls' in out
+    assert '5 contacts on file' in out
+    assert 'jacob' in out
+
+
+def test_comment_unchanged_without_history():
+    parsed = {'company_name': 'Acme', 'segment': 'brokerage', 'company_size': 2000}
+    base = meeting_bot._log_comment(parsed, False, poster='U1')
+    with_none = meeting_bot._log_comment(parsed, False, poster='U1', history=None)
+    assert base == with_none
+    assert 'spoken to' not in base

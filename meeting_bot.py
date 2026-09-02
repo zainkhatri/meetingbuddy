@@ -1127,7 +1127,7 @@ def _log_fields(parsed, is_conference):
     return fields
 
 
-def _log_comment(parsed, is_conference, poster=None):
+def _log_comment(parsed, is_conference, poster=None, history=None):
     """Friendly thread comment: share the info the bot researched (Segment/Size)
     and flag any meeting-log fields still missing. Returns '' when there's
     nothing to add. `poster` is the booker's Slack user id (for @mention).
@@ -1154,6 +1154,26 @@ def _log_comment(parsed, is_conference, poster=None):
         lines.append(f"Thanks {who}! 🙌 Logged your meeting with *{company}*.")
     if missing:
         lines.append("Couldn't find: " + ', '.join(missing) + " — add if you can.")
+    if history:
+        hist = []
+        if history.get('meetings_count'):
+            last = history.get('last_meeting_date')
+            hist.append(f"• {history['meetings_count']} prior meetings"
+                        + (f" (last: {last})" if last else ""))
+        deal = history.get('deal')
+        if deal and deal.get('name'):
+            amt = f", ${deal['amount']}" if deal.get('amount') else ""
+            label = 'Open deal' if deal.get('open') else 'Deal'
+            hist.append(f"• {label}: {deal['name']} ({deal.get('stage')}{amt})")
+        if history.get('contacts_count'):
+            hist.append(f"• {history['contacts_count']} contacts on file")
+        if history.get('owner_name'):
+            act = history.get('last_activity_date')
+            hist.append(f"• Owner: {history['owner_name']}"
+                        + (f" · last activity {act}" if act else ""))
+        if hist:
+            lines.append(f"📋 We've spoken to *{company}* before:")
+            lines += hist
     lines.append(f"Nice meeting, {who}! 🎉")
     return '\n'.join(lines)
 
