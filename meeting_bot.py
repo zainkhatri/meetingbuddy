@@ -802,6 +802,43 @@ def _hs_search_total(obj, company_id, props):
     return 0, None
 
 
+def _search_objects(obj, company_id, props, sort_prop, limit):
+    """List of {'id', **properties} for `obj` associated to company_id, newest
+    first. [] on any failure — a degraded sub-read."""
+    try:
+        body = {'filterGroups': [{'filters': [
+                    {'propertyName': 'associations.company', 'operator': 'EQ', 'value': str(company_id)}]}],
+                'properties': props,
+                'sorts': [{'propertyName': sort_prop, 'direction': 'DESCENDING'}],
+                'limit': limit}
+        r = requests.post(f'https://api.hubapi.com/crm/v3/objects/{obj}/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code == 200:
+            out = []
+            for it in r.json().get('results', []):
+                row = dict(it.get('properties') or {})
+                row['id'] = it.get('id')
+                out.append(row)
+            return out
+    except Exception:
+        pass
+    return []
+
+
+def _gather_account_content(company_id):
+    """Bounded prior meetings/notes/emails for a company. Each source degrades
+    independently to []."""
+    return {
+        'meetings': _search_objects('meetings', company_id,
+            ['hs_meeting_title', 'hs_meeting_start_time', 'hs_meeting_body', 'hs_meeting_outcome'],
+            'hs_meeting_start_time', 8),
+        'notes': _search_objects('notes', company_id,
+            ['hs_note_body', 'hs_timestamp'], 'hs_timestamp', 10),
+        'emails': _search_objects('emails', company_id,
+            ['hs_email_subject', 'hs_email_text', 'hs_timestamp'], 'hs_timestamp', 10),
+    }
+
+
 def _day(ts):
     """'2026-06-14T10:00:00Z' -> '2026-06-14'. None-safe."""
     return ts[:10] if ts else None
