@@ -133,3 +133,31 @@ def test_history_includes_summary_and_participants(monkeypatch):
     # existing keys still present
     assert h['meetings_count'] == 2
     assert h['contacts_count'] == 5
+
+
+def test_render_comprehensive_block():
+    parsed = {'company_name': 'Acme', 'segment': 'brokerage', 'company_size': 2000}
+    history = {
+        'summary': 'Two calls since March on claims automation; stalled on pricing.',
+        'participants': [{'name': 'Jane Doe', 'title': 'VP Ops'}, {'name': 'Mark Lee', 'title': None}],
+        'deal': {'name': 'Acme - Intro Calls', 'stage': 'appointmentscheduled', 'amount': '40000', 'open': True},
+        'last_touch': {'type': 'email', 'date': '2026-08-20'},
+        'meetings_count': 3, 'contacts_count': 5, 'owner_name': 'jacob',
+    }
+    out = meeting_bot._log_comment(parsed, False, poster='U1', history=history)
+    assert '📋 *Acme* — account history' in out
+    assert 'Two calls since March' in out
+    assert '• Talked to: Jane Doe (VP Ops), Mark Lee' in out
+    assert '• Open deal: Acme - Intro Calls (appointmentscheduled, $40000)' in out
+    assert '• Last touch: email, 2026-08-20' in out
+    # comprehensive block replaces the bullet tally
+    assert "We've spoken to" not in out
+
+
+def test_render_falls_back_to_bullets_without_summary():
+    parsed = {'company_name': 'Acme'}
+    history = {'meetings_count': 3, 'last_meeting_date': '2026-06-14', 'contacts_count': 5}
+    out = meeting_bot._log_comment(parsed, False, poster='U1', history=history)
+    assert "📋 We've spoken to *Acme* before:" in out
+    assert '3 prior meetings (last: 2026-06-14)' in out
+    assert 'account history' not in out

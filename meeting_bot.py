@@ -1310,7 +1310,22 @@ def _log_comment(parsed, is_conference, poster=None, history=None):
         lines.append(f"Thanks {who}! 🙌 Logged your meeting with *{company}*.")
     if missing:
         lines.append("Couldn't find: " + ', '.join(missing) + " — add if you can.")
-    if history:
+    if history and history.get('summary'):
+        lines.append(f"📋 *{company}* — account history")
+        lines.append(history['summary'])
+        parts = history.get('participants') or []
+        if parts:
+            who = ', '.join(p['name'] + (f" ({p['title']})" if p.get('title') else '') for p in parts)
+            lines.append(f"• Talked to: {who}")
+        deal = history.get('deal')
+        if deal and deal.get('name'):
+            amt = f", ${deal['amount']}" if deal.get('amount') else ""
+            label = 'Open deal' if deal.get('open') else 'Deal'
+            lines.append(f"• {label}: {deal['name']} ({deal.get('stage') or ''}{amt})")
+        lt = history.get('last_touch')
+        if lt and lt.get('date'):
+            lines.append(f"• Last touch: {lt['type']}, {lt['date']}")
+    elif history:
         hist = []
         if history.get('meetings_count'):
             last = history.get('last_meeting_date')
@@ -1320,7 +1335,7 @@ def _log_comment(parsed, is_conference, poster=None, history=None):
         if deal and deal.get('name'):
             amt = f", ${deal['amount']}" if deal.get('amount') else ""
             label = 'Open deal' if deal.get('open') else 'Deal'
-            hist.append(f"• {label}: {deal['name']} ({deal.get('stage')}{amt})")
+            hist.append(f"• {label}: {deal['name']} ({deal.get('stage') or ''}{amt})")
         if history.get('contacts_count'):
             hist.append(f"• {history['contacts_count']} contacts on file")
         if history.get('owner_name'):
