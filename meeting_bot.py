@@ -754,6 +754,115 @@ def ensure_deal(channel, conference_source, company_name, company_id,
     return ''
 
 
+# Invert the BDR roster once for owner id -> name; cache HubSpot owner lookups
+# for ids not in the roster (AEs, etc.) so we hit /owners/ at most once each.
+_OWNER_BY_ID = {oid: name for name, oid in NAME_TO_OWNER.items()}
+_OWNER_NAME_CACHE = {}
+
+
+def _owner_name(owner_id):
+    """Display name for a HubSpot owner id. Roster first, then cached API lookup.
+    None on failure — callers omit the owner line rather than break."""
+    if not owner_id:
+        return None
+    if owner_id in _OWNER_BY_ID:
+        return _OWNER_BY_ID[owner_id]
+    if owner_id in _OWNER_NAME_CACHE:
+        return _OWNER_NAME_CACHE[owner_id]
+    try:
+        r = requests.get(f'https://api.hubapi.com/crm/v3/owners/{owner_id}', headers=HS, timeout=15)
+        if r.status_code == 200:
+            d = r.json()
+            name = (d.get('firstName') or '').strip() or (d.get('email') or '').split('@')[0]
+            _OWNER_NAME_CACHE[owner_id] = name or None
+            return _OWNER_NAME_CACHE[owner_id]
+    except Exception:
+        pass
+    return None
+
+
+def _hs_search_total(obj, company_id, props):
+    """(total, first_result_properties) for `obj` associated to company_id, sorted
+    by first prop desc. (0, None) on any failure — a degraded sub-read."""
+    try:
+        body = {'filterGroups': [{'filters': [
+                    {'propertyName': 'associations.company', 'operator': 'EQ', 'value': str(company_id)}]}],
+                'properties': props, 'limit': 1}
+        if props:
+            body['sorts'] = [{'propertyName': props[0], 'direction': 'DESCENDING'}]
+        r = requests.post(f'https://api.hubapi.com/crm/v3/objects/{obj}/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code == 200:
+            j = r.json()
+            results = j.get('results', [])
+            return j.get('total', 0), (results[0].get('properties') if results else None)
+    except Exception:
+        pass
+    return 0, None
+
+
+def _day(ts):
+    """'2026-06-14T10:00:00Z' -> '2026-06-14'. None-safe."""
+    return ts[:10] if ts else None
+
+
+def hs_company_history(company_id, contact_id):
+    """Prior HubSpot footprint for an EXISTING company, snapshotted before this
+    booking's writes. Each sub-read degrades independently. None if nothing found.
+    See docs/superpowers/specs/2026-09-02-hubspot-account-history-design.md."""
+    if not company_id:
+        return None
+    h = {}
+
+    # Prior meetings
+    m_total, m_first = _hs_search_total('meetings', company_id, ['hs_meeting_start_time'])
+    if m_total:
+        h['meetings_count'] = m_total
+        last = _day((m_first or {}).get('hs_meeting_start_time'))
+        if last:
+            h['last_meeting_date'] = last
+
+    # Deals: prefer an open one, else most recent
+    try:
+        body = {'filterGroups': [{'filters': [
+                    {'propertyName': 'associations.company', 'operator': 'EQ', 'value': str(company_id)}]}],
+                'properties': ['dealname', 'dealstage', 'amount'],
+                'sorts': [{'propertyName': 'createdate', 'direction': 'DESCENDING'}], 'limit': 25}
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code == 200:
+            deals = [d.get('properties', {}) for d in r.json().get('results', [])]
+            chosen = next((d for d in deals if d.get('dealstage') in DEAL_OPEN_STAGES), deals[0] if deals else None)
+            if chosen:
+                h['deal'] = {'name': chosen.get('dealname'), 'stage': chosen.get('dealstage'),
+                             'amount': chosen.get('amount') or None,
+                             'open': chosen.get('dealstage') in DEAL_OPEN_STAGES}
+    except Exception:
+        pass
+
+    # Known contacts on file
+    c_total, _ = _hs_search_total('contacts', company_id, [])
+    if c_total:
+        h['contacts_count'] = c_total
+
+    # Owner + last activity from the company record
+    try:
+        r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{company_id}',
+                         headers=HS, params={'properties': 'hubspot_owner_id,hs_last_activity_date'}, timeout=15)
+        if r.status_code == 200:
+            props = r.json().get('properties', {})
+            name = _owner_name(props.get('hubspot_owner_id'))
+            if name:
+                h['owner_name'] = name
+            act = _day(props.get('hs_last_activity_date'))
+            if act:
+                h['last_activity_date'] = act
+    except Exception:
+        pass
+
+    return h or None
+
+
 # --- Slack bot ---
 app = App(token=SLACK_BOT_TOKEN)
 
