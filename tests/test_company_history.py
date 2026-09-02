@@ -154,6 +154,15 @@ def test_render_comprehensive_block():
     assert "We've spoken to" not in out
 
 
+def test_comprehensive_signoff_keeps_poster_mention():
+    parsed = {'company_name': 'Acme'}
+    history = {'summary': 'One call on claims.',
+               'participants': [{'name': 'Jane Doe', 'title': 'VP Ops'}]}
+    out = meeting_bot._log_comment(parsed, False, poster='U1', history=history)
+    assert 'Nice meeting, <@U1>! 🎉' in out
+    assert '• Talked to: Jane Doe (VP Ops)' in out
+
+
 def test_render_falls_back_to_bullets_without_summary():
     parsed = {'company_name': 'Acme'}
     history = {'meetings_count': 3, 'last_meeting_date': '2026-06-14', 'contacts_count': 5}

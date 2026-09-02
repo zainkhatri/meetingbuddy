@@ -1315,8 +1315,8 @@ def _log_comment(parsed, is_conference, poster=None, history=None):
         lines.append(history['summary'])
         parts = history.get('participants') or []
         if parts:
-            who = ', '.join(p['name'] + (f" ({p['title']})" if p.get('title') else '') for p in parts)
-            lines.append(f"• Talked to: {who}")
+            who_talked = ', '.join(p['name'] + (f" ({p['title']})" if p.get('title') else '') for p in parts)
+            lines.append(f"• Talked to: {who_talked}")
         deal = history.get('deal')
         if deal and deal.get('name'):
             amt = f", ${deal['amount']}" if deal.get('amount') else ""
