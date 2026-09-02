@@ -774,6 +774,7 @@ def _owner_name(owner_id):
         if r.status_code == 200:
             d = r.json()
             name = (d.get('firstName') or '').strip() or (d.get('email') or '').split('@')[0]
+            # ponytail: negative-cache — transient owner-lookup failure suppressed until restart
             _OWNER_NAME_CACHE[owner_id] = name or None
             return _OWNER_NAME_CACHE[owner_id]
     except Exception:
@@ -806,7 +807,7 @@ def _day(ts):
     return ts[:10] if ts else None
 
 
-def hs_company_history(company_id, contact_id):
+def hs_company_history(company_id):
     """Prior HubSpot footprint for an EXISTING company, snapshotted before this
     booking's writes. Each sub-read degrades independently. None if nothing found.
     See docs/superpowers/specs/2026-09-02-hubspot-account-history-design.md."""
@@ -1231,6 +1232,10 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
     # 1. Find or create company
     co = hs_find_company(company_name) if company_name else None
     company_id = co['id'] if co else None
+    # Snapshot prior HubSpot footprint BEFORE any writes, so counts exclude the
+    # meeting/deal we're about to create AND the contact we may create below.
+    # Net-new company (co is None) -> no reads.
+    history = hs_company_history(company_id) if co else None
 
     # 2. Find or create contact (company disambiguates same-name collisions)
     contact = hs_find_contact(first, last, email, company_name)
@@ -1238,9 +1243,6 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         contact = hs_create_contact(first, last, parsed.get('contact_title'),
                                      company_name, email, parsed.get('contact_linkedin'), owner_id)
     contact_id = contact['id'] if contact else None
-    # Snapshot prior HubSpot footprint BEFORE any writes, so counts exclude the
-    # meeting/deal we're about to create. Net-new company (co is None) -> no reads.
-    history = hs_company_history(company_id, contact_id) if co else None
     if contact_id:
         hs_set_contact_sdr_owner(contact_id, owner_id)
 

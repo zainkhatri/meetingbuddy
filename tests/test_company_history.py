@@ -43,7 +43,7 @@ def test_full_history(monkeypatch):
         contacts={'total': 5, 'results': []},
         company={'properties': {'hubspot_owner_id': '162210484', 'hs_last_activity_date': '2026-08-20T00:00:00Z'}},
     )
-    h = meeting_bot.hs_company_history('C1', 'K1')
+    h = meeting_bot.hs_company_history('C1')
     assert h['meetings_count'] == 3
     assert h['last_meeting_date'] == '2026-06-14'
     assert h['deal']['name'] == 'Acme - Intro Calls'
@@ -54,9 +54,10 @@ def test_full_history(monkeypatch):
 
 
 def test_partial_degrades(monkeypatch):
-    # meetings read fails (500), everything else empty -> only contacts present
+    # only contacts read succeeds; meetings, deals, and company all fail (500)
+    # -> helper still returns {'contacts_count': 2}
     _install(monkeypatch, contacts={'total': 2, 'results': []})
-    h = meeting_bot.hs_company_history('C1', 'K1')
+    h = meeting_bot.hs_company_history('C1')
     assert h == {'contacts_count': 2}
 
 
@@ -66,7 +67,7 @@ def test_all_empty_returns_none(monkeypatch):
              deals={'total': 0, 'results': []},
              contacts={'total': 0, 'results': []},
              company={'properties': {}})
-    assert meeting_bot.hs_company_history('C1', 'K1') is None
+    assert meeting_bot.hs_company_history('C1') is None
 
 
 def test_comment_renders_history_block():
