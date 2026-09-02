@@ -1238,6 +1238,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         contact = hs_create_contact(first, last, parsed.get('contact_title'),
                                      company_name, email, parsed.get('contact_linkedin'), owner_id)
     contact_id = contact['id'] if contact else None
+    # Snapshot prior HubSpot footprint BEFORE any writes, so counts exclude the
+    # meeting/deal we're about to create. Net-new company (co is None) -> no reads.
+    history = hs_company_history(company_id, contact_id) if co else None
     if contact_id:
         hs_set_contact_sdr_owner(contact_id, owner_id)
 
@@ -1323,7 +1326,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         prev = existing['sourced_by']
         action = 'Re-tagged existing meeting' if prev and prev != owner_id else 'Tagged existing meeting'
         say(text=f"✓ {action} (was {prev or 'untagged'}){sheet_result}{deal_suffix}\n{mtg_url}", thread_ts=ts)
-        _note = _log_comment(parsed, bool(profile.get('is_conference')), poster)
+        _note = _log_comment(parsed, bool(profile.get('is_conference')), poster, history=history)
         if _note:
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
@@ -1430,7 +1433,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
             f"{mtg_url}"
         )
         say(text=confirmation, thread_ts=ts)
-        note = _log_comment(parsed, bool(profile.get('is_conference')), poster)
+        note = _log_comment(parsed, bool(profile.get('is_conference')), poster, history=history)
         if note:
             say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
