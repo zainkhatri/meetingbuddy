@@ -79,3 +79,57 @@ def test_contacts_display_caps_at_six(monkeypatch):
     monkeypatch.setattr(meeting_bot.requests, 'post', fake_post)
     meeting_bot._contacts_display([str(i) for i in range(20)])
     assert captured['n'] == 6
+
+
+class _Block:
+    def __init__(self, text):
+        self.type = 'text'
+        self.text = text
+
+class _Msg:
+    def __init__(self, text):
+        self.content = [_Block(text)]
+
+
+def test_summarize_account_calls_claude(monkeypatch):
+    captured = {}
+    class FakeMessages:
+        def create(self, **kw):
+            captured.update(kw)
+            return _Msg('Two calls since March on claims automation.')
+    monkeypatch.setattr(meeting_bot, 'client', type('C', (), {'messages': FakeMessages()})())
+    out = meeting_bot._summarize_account(
+        [{'hs_meeting_title': 'Intro', 'hs_meeting_body': 'discussed claims'}],
+        [{'hs_note_body': 'left vm'}],
+        [{'hs_email_subject': 'pricing', 'hs_email_text': 'sent quote'}])
+    assert out == 'Two calls since March on claims automation.'
+    assert captured['model'] == 'claude-haiku-4-5-20251001'
+    assert captured['max_tokens'] == 180
+    assert len(captured['messages'][0]['content']) <= 6000
+
+
+def test_summarize_account_empty_returns_none(monkeypatch):
+    monkeypatch.setattr(meeting_bot, 'client', object())  # never called
+    assert meeting_bot._summarize_account([], [], []) is None
+
+
+def test_summarize_account_claude_error_returns_none(monkeypatch):
+    class FakeMessages:
+        def create(self, **kw):
+            raise RuntimeError('boom')
+    monkeypatch.setattr(meeting_bot, 'client', type('C', (), {'messages': FakeMessages()})())
+    assert meeting_bot._summarize_account([{'hs_meeting_title': 'Intro'}], [], []) is None
+
+
+def test_last_touch_picks_most_recent(monkeypatch):
+    content = {
+        'meetings': [{'hs_meeting_start_time': '2026-06-14T10:00:00Z'}],
+        'notes': [{'hs_timestamp': '2026-05-01T00:00:00Z'}],
+        'emails': [{'hs_timestamp': '2026-08-20T00:00:00Z'}],
+    }
+    assert meeting_bot._last_touch(content, None) == {'type': 'email', 'date': '2026-08-20'}
+
+
+def test_last_touch_falls_back_to_activity(monkeypatch):
+    content = {'meetings': [], 'notes': [], 'emails': []}
+    assert meeting_bot._last_touch(content, '2026-07-01T00:00:00Z') == {'type': 'activity', 'date': '2026-07-01'}

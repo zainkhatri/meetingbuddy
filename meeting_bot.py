@@ -889,6 +889,62 @@ def _account_participants(meetings, emails):
     return _contacts_display(ids)
 
 
+def _clip(s, n):
+    """First n chars of s (None-safe)."""
+    return (s or '')[:n]
+
+
+def _summarize_account(meetings, notes, emails):
+    """2-3 sentence grounded narrative from HubSpot content, via haiku. None on
+    empty input, no client, or any Claude error — never raises."""
+    parts = []
+    for m in meetings:
+        head = _clip(m.get('hs_meeting_title'), 120)
+        body = _clip(m.get('hs_meeting_body'), 500)
+        if head or body:
+            parts.append(f"Meeting: {head}\n{body}".strip())
+    for n in notes:
+        body = _clip(n.get('hs_note_body'), 500)
+        if body:
+            parts.append(f"Note: {body}")
+    for e in emails:
+        subj = _clip(e.get('hs_email_subject'), 120)
+        body = _clip(e.get('hs_email_text'), 300)
+        if subj or body:
+            parts.append(f"Email: {subj}\n{body}".strip())
+    blob = '\n\n'.join(parts)[:6000]
+    if not blob.strip() or not client:
+        return None
+    try:
+        r = client.messages.create(
+            model='claude-haiku-4-5-20251001', max_tokens=180,
+            system=("You brief an account executive before a sales call. In 2-3 sentences, "
+                    "summarize the prior relationship strictly from the provided HubSpot records "
+                    "(meetings, notes, emails). State what was discussed and the current status. "
+                    "Do not invent facts; if the records are thin, say so briefly."),
+            messages=[{'role': 'user', 'content': blob}])
+        text = ''.join(b.text for b in r.content if getattr(b, 'type', None) == 'text').strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def _last_touch(content, fallback_date):
+    """Most-recent (type, date) across gathered content; falls back to the
+    company's last-activity date. None if nothing. HubSpot v3 datetimes are ISO
+    strings, so lexical max is chronological."""
+    cands = [('meeting', m.get('hs_meeting_start_time')) for m in content['meetings']]
+    cands += [('note', n.get('hs_timestamp')) for n in content['notes']]
+    cands += [('email', e.get('hs_timestamp')) for e in content['emails']]
+    cands = [(t, d) for t, d in cands if d]
+    if cands:
+        t, d = max(cands, key=lambda x: x[1])
+        return {'type': t, 'date': _day(d)}
+    if fallback_date:
+        return {'type': 'activity', 'date': _day(fallback_date)}
+    return None
+
+
 def _day(ts):
     """'2026-06-14T10:00:00Z' -> '2026-06-14'. None-safe."""
     return ts[:10] if ts else None
