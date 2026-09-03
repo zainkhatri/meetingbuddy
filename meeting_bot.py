@@ -504,8 +504,14 @@ def hs_find_existing_meeting(contact_id, date_str):
         return None
     candidates.sort()  # closest match first
     diff, mid, sourced_by, existing_owner = candidates[0]
-    # If we have a target, only accept matches within ±5 days
-    if target and diff > 5 * 86400:
+    # Normally only accept a match within ±5 days of the announced date. EXCEPTION:
+    # if the contact has exactly ONE alive meeting it's unambiguous — accept it even
+    # when it drifted far from the announced date (a booking rescheduled weeks/months
+    # out — the case where meeting_sourced_by never got stamped). The caller still
+    # enforces title_matches_company, so this can't tag a different company's meeting.
+    # With several meetings we can't guess which one the post meant, so keep the window.
+    lone_alive = len(candidates) == 1
+    if target and diff > 5 * 86400 and not lone_alive:
         return None
     # Re-fetch title for caller (used for conference auto-tag)
     rg = requests.get(f'https://api.hubapi.com/crm/v3/objects/meetings/{mid}', headers=HS,
