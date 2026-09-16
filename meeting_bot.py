@@ -38,6 +38,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 import sheet_sync
 import attribution
+from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -1065,6 +1066,50 @@ def _is_conference_reply(event, ts):
     (not a top-level booking post, not a thread parent)."""
     tt = event.get('thread_ts')
     return bool(tt) and tt != ts and event.get('channel') == CONFERENCE_MEETINGS_CHANNEL
+
+
+_CLAIM_LOCKS = {}
+_CLAIM_LOCKS_GUARD = threading.Lock()
+
+def _claim_lock(cid):
+    with _CLAIM_LOCKS_GUARD:
+        return _CLAIM_LOCKS.setdefault(cid, threading.Lock())
+
+@app.action('claim_account')
+def handle_claim_account(ack, body, client, action):
+    ack()
+    cid = str(action['value'])
+    uid = body['user']['id']
+    ch  = body['channel']['id']
+    sdr = SDR_SLACK.get(uid)
+    if not sdr:
+        client.chat_postEphemeral(channel=ch, user=uid,
+                                  text="You're not set up as an SDR, so you can't claim accounts.")
+        return
+    with _claim_lock(cid):                                   # settle near-simultaneous clicks
+        r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
+                         params={'properties': 'name,sdr_owner,recycle_status,last_claim_by'}, timeout=30)
+        if not r or not r.ok:
+            client.chat_postEphemeral(channel=ch, user=uid, text="Couldn't reach the CRM — try again."); return
+        props = r.json().get('properties', {})
+        ok, payload = claim_decision(props, sdr)
+        if not ok:
+            client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
+        pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
+                            json={'properties': payload}, timeout=30)
+        if not pr or not pr.ok:
+            client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
+    name = props.get('name') or cid
+    client.chat_postEphemeral(channel=ch, user=uid, text=f"✅ {name} is yours.")
+    # DM the previous owner, if we can map them
+    prev = payload['claimed_from']
+    prev_uid = SDR_SLACK_REV.get(prev)
+    if prev_uid:
+        try:
+            client.chat_postMessage(channel=prev_uid,
+                text=f"{sdr} claimed *{name}* from you — it was 30+ days cold.")
+        except Exception as e:
+            print(f'[claim] old-owner DM failed: {e}', flush=True)
 
 
 @app.event('message')
