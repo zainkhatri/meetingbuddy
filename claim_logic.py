@@ -2,8 +2,14 @@
 """Pure claim logic for the weekly self-serve claim button. No slack/network/env at import."""
 from datetime import datetime, timezone
 
-# Slack user id -> SDR first name (the 5 valid sdr_owner enum values). Fill in real ids at deploy.
-SDR_SLACK = {}   # e.g. {'U01ZAIN': 'Zain', 'U02JAC': 'Jacob', 'U03DANI': 'Dani', 'U04BEN': 'Ben', 'U05MATT': 'Matt'}
+# Slack user id -> SDR first name (the 5 valid sdr_owner enum values). Looked up 2026-09-16.
+SDR_SLACK = {
+    'U0AGP9NCBA5': 'Zain',
+    'U0ADR5W8Q10': 'Jacob',    # Jacob Sanders
+    'U099VBSUFPD': 'Dani',     # Daniella Salgado
+    'U0B5J4MDC4T': 'Ben',      # Ben Trotter
+    'U0B2WK6G3R9': 'Matt',     # Matt Stapleton
+}
 SDR_SLACK_REV = {name: uid for uid, name in SDR_SLACK.items()}
 
 def _claim_iso():
