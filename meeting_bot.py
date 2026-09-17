@@ -1518,6 +1518,11 @@ def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None,
 
 
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, poster=None):
+    # AE/ITC blitz channel: never write anything to HubSpot from here. The blitz
+    # is outputs-only and fed by blitz_hook; this guard is defense-in-depth so no
+    # caller (live handler, replay, live-sweep) can leak a blitz post into the CRM.
+    if channel and blitz_hook.BLITZ_CHANNEL_ID and channel == blitz_hook.BLITZ_CHANNEL_ID:
+        return
     # Test channel: run the real parse -> ICP -> VP+ nudge, but write NOTHING to
     # HubSpot (no contact/company/meeting/deal). Guard lives here so EVERY caller
     # (live handler, replay, live-sweep) is covered. Posts treated as demos.
@@ -1932,6 +1937,14 @@ def replay_missed_messages():
             ts = m.get('ts')
             user_id = m.get('user')
             if not ts or not user_id:
+                continue
+            # Blitz channel: feed the leaderboard (idempotent), never the CRM path
+            if blitz_hook.BLITZ_CHANNEL_ID and cid == blitz_hook.BLITZ_CHANNEL_ID:
+                try:
+                    blitz_hook.handle({'channel': cid, 'user': user_id, 'ts': ts, 'text': text},
+                                      app.client, parse_with_claude)
+                except Exception as e:
+                    print(f'[blitz] replay ts={ts}: {e}', flush=True)
                 continue
             try:
                 parsed_raw = parse_with_claude(text)
@@ -2401,6 +2414,14 @@ def live_sweep_loop():
                     ts = m.get('ts')
                     user_id = m.get('user')
                     if not text or not ts or not user_id:
+                        continue
+                    # Blitz channel: feed the leaderboard (idempotent), never the CRM path
+                    if blitz_hook.BLITZ_CHANNEL_ID and cid == blitz_hook.BLITZ_CHANNEL_ID:
+                        try:
+                            blitz_hook.handle({'channel': cid, 'user': user_id, 'ts': ts, 'text': text},
+                                              app.client, parse_with_claude)
+                        except Exception as e:
+                            print(f'[blitz] sweep ts={ts}: {e}', flush=True)
                         continue
                     if not _looks_like_booking(text):
                         continue
