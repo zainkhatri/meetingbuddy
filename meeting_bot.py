@@ -1096,6 +1096,19 @@ def weekly_claim_count(sdr):
                       headers=HS, json=body, timeout=30)
     return r.json().get('total', 0) if (r is not None and r.ok) else 0
 
+def create_claim_note(cid, prev, sdr):
+    """Log the claim on the company's HubSpot timeline (audit trail). Best-effort."""
+    body = {'properties': {
+                'hs_note_body': ('♻️ Account recycling: SDR ownership claimed by ' + sdr
+                                 + (f' (from {prev})' if prev else '') + ' via the weekly up-for-grabs digest.'),
+                'hs_timestamp': int(time.time() * 1000)},
+            'associations': [{'to': {'id': cid},
+                'types': [{'associationCategory': 'HUBSPOT_DEFINED', 'associationTypeId': 190}]}]}
+    try:
+        requests.post('https://api.hubapi.com/crm/v3/objects/notes', headers=HS, json=body, timeout=30)
+    except Exception as e:
+        print(f'[claim] note log failed: {e}', flush=True)
+
 @app.action('claim_account')
 def handle_claim_account(ack, body, client, action):
     ack()
@@ -1148,6 +1161,7 @@ def handle_claim_account(ack, body, client, action):
                 client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
             _WEEK_COUNT[sdr] += 1                            # count only a confirmed claim
     name = props.get('name') or cid                         # public greyed row is the confirmation; no ephemeral
+    create_claim_note(cid, payload['claimed_from'], sdr)     # log the claim on the HubSpot timeline
     # DM the previous owner, if we can map them
     prev = payload['claimed_from']
     prev_uid = SDR_SLACK_REV.get(prev)
