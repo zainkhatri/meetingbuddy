@@ -1107,11 +1107,18 @@ def handle_claim_account(ack, body, client, action):
         client.chat_postEphemeral(channel=ch, user=uid,
                                   text="Only BDRs can claim these — this is BDR account recycling.")
         return
-    # even-split cap: each BDR may claim ceil(digest_size / 5) per rolling week.
-    # cap value comes from the digest they're viewing; the used-count is tracked in-process
-    # under a per-BDR lock (seeded once from HubSpot) so rapid clicks can't race the search index.
-    msg = body.get('message', {})
-    cap = claim_cap(count_company_rows(msg.get('blocks', [])))
+    # even-split cap: each BDR may claim ceil(digest_size / 5) per rolling week. Cap value comes
+    # from the digest they're viewing; used-count is tracked in-process under a per-BDR lock
+    # (seeded once from HubSpot) so rapid clicks can't race the search index.
+    msg  = body.get('message', {})
+    ts   = msg.get('ts')
+    orig = msg.get('blocks', [])
+    cap  = claim_cap(count_company_rows(orig))
+    def _update(blocks):
+        try:
+            client.chat_update(channel=ch, ts=ts, blocks=blocks, text=msg.get('text', 'Up for grabs this week'))
+        except Exception as e:
+            print(f'[claim] chat_update failed: {e}', flush=True)
     with _bdr_lock(sdr):                                     # serialize a BDR's clicks (cap is race-free)
         if sdr not in _WEEK_COUNT:
             _WEEK_COUNT[sdr] = weekly_claim_count(sdr)       # seed once, then count in memory
@@ -1119,29 +1126,29 @@ def handle_claim_account(ack, body, client, action):
             client.chat_postEphemeral(channel=ch, user=uid,
                 text=f"You've hit your claim limit for this week ({cap}). More open up next Monday.")
             return
+        # optimistic: grey the row NOW so it's unclickable instantly (no double-clicks during the swap)
+        _update(mark_claimed(orig, cid, sdr))
         with _claim_lock(cid):                               # settle two BDRs racing the same account
             r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                              params={'properties': 'name,sdr_owner,recycle_status,last_claim_by'}, timeout=30)
             if not r or not r.ok:
+                _update(orig)                                # restore button — account still available
                 client.chat_postEphemeral(channel=ch, user=uid, text="Couldn't reach the CRM — try again."); return
             props = r.json().get('properties', {})
             ok, payload = claim_decision(props, sdr)
             if not ok:
+                # already claimed / self — keep greyed, but show the true owner's name
+                true_owner = (props.get('last_claim_by') or props.get('sdr_owner') or sdr).strip() or sdr
+                _update(mark_claimed(orig, cid, true_owner))
                 client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
             pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                                 json={'properties': payload}, timeout=30)
             if not pr or not pr.ok:
+                _update(orig)                                # restore button — save failed
                 client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
             _WEEK_COUNT[sdr] += 1                            # count only a confirmed claim
     name = props.get('name') or cid
     client.chat_postEphemeral(channel=ch, user=uid, text=f"✅ {name} is yours.")
-    # rewrite the claimed row -> "✅ Claimed by {sdr}" and drop its button
-    try:
-        client.chat_update(channel=ch, ts=msg['ts'],
-                           blocks=mark_claimed(msg.get('blocks', []), cid, sdr),
-                           text=msg.get('text', 'Up for grabs this week'))
-    except Exception as e:
-        print(f'[claim] message update failed: {e}', flush=True)
     # DM the previous owner, if we can map them
     prev = payload['claimed_from']
     prev_uid = SDR_SLACK_REV.get(prev)
