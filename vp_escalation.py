@@ -444,9 +444,53 @@ def handle_booked_meeting(meeting: dict, contact: dict, busy_minutes: Optional[d
     if m == "propose":
         return {"action": "propose", "exec": suggested,
                 "blocks": proposal_blocks(meeting, contact, suggested)}
-    # auto: add the exec (sendUpdates=none) AND post a flag; add_guest respects gates.
-    organizer = meeting.get("calendar_id") or meeting.get("organizer_calendar")
-    result = add_guest(meeting.get("event_id", ""), suggested, calendar_id=organizer)
-    return {"action": "auto_add", "exec": suggested, "result": result,
+    # auto: pure decision only. The caller resolves the real GCal event and adds
+    # the exec, falling back to the nudge text if it can't. No I/O here.
+    return {"action": "auto", "exec": suggested,
             "thread_flag": thread_flag(meeting, contact, suggested),
+            "nudge_text": nudge_message(booker, meeting, contact),
             "note": build_note(suggested, contact, "auto mode, free/busy")}
+
+
+# ── Calendar event resolution (needs domain-wide delegation) ─────────────────
+def _event_matches(summary: str, attendee_emails, terms) -> bool:
+    """True if any match term appears in the event summary or an attendee's email.
+    Pure and unit-testable. Terms are matched case-insensitively as substrings."""
+    hay = (summary or "").lower()
+    emails = " ".join((e or "").lower() for e in (attendee_emails or [])[:50])
+    for t in terms[:20]:                # bounded (Power-of-Ten rule 2)
+        t = (t or "").strip().lower()
+        if t and (t in hay or t in emails):
+            return True
+    return False
+
+
+def find_calendar_event(search_as: str, start_iso: str, terms):
+    """Locate the demo's GCal event by searching `search_as`'s calendar around the
+    meeting time and matching on terms. Returns (event_id, organizer_email) or
+    (None, None). Read-only; safe in dry-run. Requires DWD (impersonation)."""
+    assert start_iso, "start_iso required"
+    if not search_as or os.environ.get("VP_CALENDAR_NO_DWD") == "1":
+        return (None, None)             # no-DWD mode can't impersonate to search
+    try:
+        token = _gcal_token(subject=search_as)
+        if not token:
+            return (None, None)
+        import requests
+        lo = _parse_iso(start_iso)
+        win_lo = (lo.replace(microsecond=0)).isoformat()
+        win_hi = lo.replace(hour=min(lo.hour + 3, 23)).isoformat()
+        r = requests.get(
+            f"{_CAL_API}/calendars/{search_as}/events",
+            params={"timeMin": win_lo, "timeMax": win_hi, "singleEvents": "true",
+                    "orderBy": "startTime", "maxResults": 20},
+            headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        r.raise_for_status()
+        for ev in r.json().get("items", [])[:20]:   # bounded
+            emails = [a.get("email") for a in ev.get("attendees", []) or []]
+            if _event_matches(ev.get("summary", ""), emails, terms):
+                org = (ev.get("organizer") or {}).get("email") or search_as
+                return (ev.get("id"), org)
+    except Exception:
+        return (None, None)             # never break the booking flow
+    return (None, None)

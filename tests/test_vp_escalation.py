@@ -112,13 +112,15 @@ def test_handle_propose_builds_blocks(monkeypatch):
     assert any(b["type"] == "actions" for b in out["blocks"])
 
 
-def test_handle_auto_respects_dryrun(monkeypatch):
+def test_handle_auto_is_pure_decision(monkeypatch):
+    # auto mode returns a pure decision (no I/O); the caller resolves+adds the event.
     monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
     monkeypatch.setenv("VP_ESCALATION_MODE", "auto")
-    monkeypatch.setenv("VP_ESCALATION_DRYRUN", "1")
-    out = vp.handle_booked_meeting(_demo(), _vp_icp_contact(), {"aman": 10, "zac": 20})
-    assert out["action"] == "auto_add"
-    assert out["result"]["performed"] is False  # no prospect email
+    out = vp.handle_booked_meeting(_demo(), _vp_icp_contact(), {"aman": 10, "zac": 20},
+                                   booker="U123")
+    assert out["action"] == "auto"
+    assert out["exec"] == "aman"                 # freer (10 < 20)
+    assert "thread_flag" in out and "nudge_text" in out  # both, for add-or-fallback
 
 
 def test_default_mode_is_nudge(monkeypatch):
@@ -138,13 +140,16 @@ def test_nudge_falls_back_to_team_without_booker(monkeypatch):
     assert out["action"] == "nudge" and "team" in out["text"]
 
 
-def test_auto_mode_still_available(monkeypatch):
-    monkeypatch.setenv("VP_ESCALATION_MODE", "auto")
-    monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
-    monkeypatch.setenv("VP_ESCALATION_DRYRUN", "1")
-    out = vp.handle_booked_meeting(_demo(), _vp_icp_contact(), {"aman": 10, "zac": 20})
-    assert out["action"] == "auto_add"
-    assert out["result"]["performed"] is False  # dry-run, no write
+def test_event_matches_company_and_email():
+    assert vp._event_matches("Demo: ePremium x FurtherAI", ["rob@epremium.com"], ["ePremium"]) is True
+    assert vp._event_matches("Intro", ["s@bhguard.com"], ["bhguard.com"]) is True
+    assert vp._event_matches("Team standup", ["a@furtherai.com"], ["ePremium"]) is False
+
+
+def test_find_calendar_event_safe_without_dwd(monkeypatch):
+    # no-DWD or missing subject -> (None, None), never raises.
+    monkeypatch.setenv("VP_CALENDAR_NO_DWD", "1")
+    assert vp.find_calendar_event("ae@furtherai.com", "2026-10-02T18:00:00Z", ["X"]) == (None, None)
 
 
 def test_add_guest_suppresses_prospect_email():

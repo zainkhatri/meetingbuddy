@@ -1455,51 +1455,82 @@ def _log_comment(parsed, is_conference, poster=None, history=None):
     return '\n'.join(lines)
 
 
-def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None,
-                       gcal_event_id=None, organizer_cal=None):
+def _hs_owner_email(owner_id):
+    """Look up a HubSpot owner's email (used as the calendar to search). None on miss."""
+    if not owner_id:
+        return None
+    try:
+        r = requests.get(f'https://api.hubapi.com/crm/v3/owners/{owner_id}',
+                         headers=HS, timeout=15)
+        if r.ok:
+            return r.json().get('email')
+    except Exception as e:
+        print(f'[vp-escalate] owner email lookup failed: {e}', flush=True)
+    return None
+
+
+def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner_id=None):
     """VP+ ICP escalation hook. Fully guarded — never breaks the booking flow.
 
-    Default mode = nudge: @mention the booker to add Zac/Aman (no calendar access).
-    Off unless VP_ESCALATION_ENABLED=1. In dry-run it only logs; posts nothing.
-    See docs/vp_escalation.md.
+    nudge mode: @mention the booker. auto mode: resolve the real GCal event and add
+    the freer exec (sendUpdates=none); if the event can't be found/added, FALL BACK
+    to the nudge so the meeting is never left uncovered. Off unless ENABLED=1.
     """
     try:
         import vp_escalation as vp
-        if not vp.enabled():
+        if not vp.enabled() or not (say and ts):
             return
         contact = vp.contact_from_parsed(parsed)
-        meeting = {
-            'id': meeting_id,
-            'event_id': gcal_event_id or f'hs-{meeting_id}',   # only used by auto mode
-            'meeting_type': parsed.get('meeting_type', 'demo'),
-            'company': parsed.get('company_name'),
-            'attendees': [],
-            'calendar_id': organizer_cal,
-        }
-        # Free/busy only matters for the Google-Calendar modes (auto/propose/digest);
-        # the default nudge mode ignores it.
-        busy = {'aman': 0, 'zac': 0}
+        meeting = {'id': meeting_id, 'meeting_type': parsed.get('meeting_type', 'demo'),
+                   'company': parsed.get('company_name'), 'attendees': []}
+        start_iso = None
         t_utc = parsed.get('meeting_time_utc')
-        if vp.mode() != 'nudge' and date_str and t_utc:
-            start = f'{date_str}T{t_utc}:00Z' if len(t_utc) <= 5 else f'{date_str}T{t_utc}Z'
+        if date_str and t_utc:
+            start_iso = f'{date_str}T{t_utc}:00Z' if len(t_utc) <= 5 else f'{date_str}T{t_utc}Z'
+        busy = {'aman': 0, 'zac': 0}
+        if vp.mode() != 'nudge' and start_iso:
             for who in ('aman', 'zac'):
-                busy[who] = vp.freebusy(who, start, start) or 0
+                busy[who] = vp.freebusy(who, start_iso, start_iso) or 0
         action = vp.handle_booked_meeting(meeting, contact, busy, booker=poster)
         act = action.get('action')
         if act == 'none':
             return
-        # Dry-run: log only, post nothing.
-        if vp.dry_run():
-            print(f'[vp-escalate][dry-run] would {act} '
-                  f'mtg={meeting_id} company={parsed.get("company_name")}', flush=True)
-            return
-        if act == 'nudge' and say and ts:
+
+        if act == 'nudge':
+            if vp.dry_run():
+                print(f'[vp-escalate][dry-run] would nudge mtg={meeting_id}', flush=True)
+                return
             say(text=action['text'], thread_ts=ts)
-            print(f'[vp-escalate] nudged booker on mtg={meeting_id}', flush=True)
-        elif act == 'auto_add' and say and ts:
-            say(text=action['thread_flag'], thread_ts=ts)
-            print(f'[vp-escalate] {action}', flush=True)
-        elif act == 'propose' and say and ts:
+            print(f'[vp-escalate] nudged booker mtg={meeting_id}', flush=True)
+            return
+
+        if act == 'auto':
+            exec_name = action['exec']
+            search_as = _hs_owner_email(owner_id)
+            terms = [t for t in [
+                parsed.get('company_name'),
+                f"{parsed.get('contact_first_name') or ''} {parsed.get('contact_last_name') or ''}".strip(),
+                parsed.get('contact_email')] if t]
+            eid, organizer = (vp.find_calendar_event(search_as, start_iso, terms)
+                              if (search_as and start_iso) else (None, None))
+            if vp.dry_run():
+                print(f'[vp-escalate][dry-run] auto exec={exec_name} event={eid} '
+                      f'org={organizer} mtg={meeting_id}', flush=True)
+                say(text=action['nudge_text'], thread_ts=ts)
+                return
+            if eid:
+                r = vp.add_guest(eid, exec_name, calendar_id=organizer)
+                if r.get('performed'):
+                    say(text=action['thread_flag'], thread_ts=ts)
+                    print(f'[vp-escalate] auto-added {exec_name} to event {eid} mtg={meeting_id}', flush=True)
+                    return
+                print(f'[vp-escalate] add failed ({r.get("reason")}); nudging mtg={meeting_id}', flush=True)
+            else:
+                print(f'[vp-escalate] event not found; nudging mtg={meeting_id}', flush=True)
+            say(text=action['nudge_text'], thread_ts=ts)
+            return
+
+        if act == 'propose':
             say(blocks=action['blocks'], text='VP+ ICP meeting — add an exec?', thread_ts=ts)
         elif act == 'digest':
             print(f'[vp-escalate] digest: {action}', flush=True)
@@ -1671,7 +1702,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if _note:
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
-        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster)
+        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster, owner_id=owner_id)
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no
@@ -1779,7 +1810,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if note:
             say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
-        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts, poster=poster)
+        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts, poster=poster, owner_id=owner_id)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 
