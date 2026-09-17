@@ -194,10 +194,13 @@ def add_guest(event_id: str, exec_name: str, calendar_id: Optional[str] = None) 
               "calendar": cal, "send_updates": "none"}
     if not enabled() or dry_run():
         return {**intent, "performed": False, "reason": "disabled_or_dryrun"}
+    no_dwd = os.environ.get("VP_CALENDAR_NO_DWD") == "1"
     subject = cal if "@" in cal else os.environ.get("VP_CALENDAR_SUBJECT", "")
-    if not subject:
+    if not no_dwd and not subject:
+        # DWD mode needs a user to impersonate; no-DWD mode acts as the SA on a
+        # shared calendar, so no subject is required.
         return {**intent, "performed": False, "reason": "no_impersonation_subject"}
-    token = _gcal_token(subject=subject)
+    token = _gcal_token(subject=subject or None)
     if not token:
         return {**intent, "performed": False, "reason": "gcal_not_configured"}
 
@@ -250,10 +253,14 @@ def _gcal_token(subject: Optional[str] = None) -> Optional[str]:
     info = json.loads(raw)
     from google.auth.transport.requests import Request
     if info.get("type") == "service_account":
-        assert subject, "service-account creds require an impersonation subject"
         from google.oauth2 import service_account
         creds = service_account.Credentials.from_service_account_info(
-            info, scopes=list(_CAL_SCOPES)).with_subject(subject)
+            info, scopes=list(_CAL_SCOPES))
+        # With domain-wide delegation, impersonate the subject. Without admin/DWD
+        # (VP_CALENDAR_NO_DWD=1), act as the service account itself and rely on
+        # calendars being explicitly shared with the SA email.
+        if subject and os.environ.get("VP_CALENDAR_NO_DWD") != "1":
+            creds = creds.with_subject(subject)
     else:
         from google.oauth2.credentials import Credentials
         creds = Credentials(
