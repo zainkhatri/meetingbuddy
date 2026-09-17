@@ -63,10 +63,10 @@ def dry_run() -> bool:
 
 
 def mode() -> str:
-    # Default: auto-add the exec and flag it in the thread. `propose` (button
-    # confirm) and `digest` (feed only) remain available if ever wanted.
-    m = os.environ.get("VP_ESCALATION_MODE", "auto").strip().lower()
-    assert m in ("digest", "propose", "auto"), f"bad VP_ESCALATION_MODE: {m}"
+    # Default: nudge — @mention the booker to add Zac/Aman (no calendar access
+    # needed). `auto`/`propose`/`digest` remain for the Google-Calendar path.
+    m = os.environ.get("VP_ESCALATION_MODE", "nudge").strip().lower()
+    assert m in ("nudge", "digest", "propose", "auto"), f"bad VP_ESCALATION_MODE: {m}"
     return m
 
 
@@ -407,29 +407,44 @@ def thread_flag(meeting: dict, contact: dict, added: str) -> str:
             f"cc <@aman> <@zac> — swap if needed.")
 
 
+def nudge_message(booker: Optional[str], meeting: dict, contact: dict) -> str:
+    """@mention the booker asking them to add Zac or Aman to the invite. No
+    calendar access needed — the booker does the add in their own calendar."""
+    assert isinstance(contact, dict), "contact must be a dict"
+    company = meeting.get("company") or "this account"
+    title = contact.get("title") or contact.get("function") or "VP+"
+    who = f"<@{booker}>" if booker else "team"
+    return (f":dart: {who} — this looks like a *VP+ ICP* meeting "
+            f"({title} at *{company}*). Please add *Zac* or *Aman* to the invite "
+            f"so an exec can join. 🙏")
+
+
 # ── Orchestrator: decide the action for one booked meeting ───────────────────
-def handle_booked_meeting(meeting: dict, contact: dict, busy_minutes: dict) -> dict:
+def handle_booked_meeting(meeting: dict, contact: dict, busy_minutes: Optional[dict] = None,
+                          booker: Optional[str] = None) -> dict:
     """Return the escalation action for a booking. Performs NO Slack/GCal I/O.
 
     The caller (meeting_bot) executes the returned action. This keeps all decision
     logic pure and unit-testable, and guarantees no outward write happens here.
-    Returns {"action": "none"|"digest"|"propose"|"auto_add", ...}.
+    Returns {"action": "none"|"nudge"|"digest"|"propose"|"auto_add", ...}.
     """
-    assert isinstance(busy_minutes, dict), "busy_minutes must be a dict"
     if not enabled():
         return {"action": "none", "reason": "disabled"}
     if not is_escalation_candidate(meeting, contact):
         return {"action": "none", "reason": "not_candidate"}
 
-    suggested = pick_exec(busy_minutes)
     m = mode()
+    if m == "nudge":                    # default — no calendar access needed
+        return {"action": "nudge", "text": nudge_message(booker, meeting, contact)}
+
+    # The remaining modes use the Google-Calendar path (need busy_minutes).
+    suggested = pick_exec(busy_minutes or {"aman": 0, "zac": 0})
     if m == "digest":
         return {"action": "digest", "exec": suggested, "meeting": meeting.get("id")}
     if m == "propose":
         return {"action": "propose", "exec": suggested,
                 "blocks": proposal_blocks(meeting, contact, suggested)}
-    # auto (default): add the exec (sendUpdates=none, no prospect email) AND post a
-    # flag in the meeting thread. add_guest still respects dry-run/enabled gates.
+    # auto: add the exec (sendUpdates=none) AND post a flag; add_guest respects gates.
     organizer = meeting.get("calendar_id") or meeting.get("organizer_calendar")
     result = add_guest(meeting.get("event_id", ""), suggested, calendar_id=organizer)
     return {"action": "auto_add", "exec": suggested, "result": result,

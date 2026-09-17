@@ -121,14 +121,30 @@ def test_handle_auto_respects_dryrun(monkeypatch):
     assert out["result"]["performed"] is False  # no prospect email
 
 
-def test_default_mode_is_auto_add_and_flags(monkeypatch):
-    # Default (no MODE set): auto-add the exec AND post a thread flag.
+def test_default_mode_is_nudge(monkeypatch):
+    # Default (no MODE set): @mention the booker to add an exec. No calendar access.
     monkeypatch.delenv("VP_ESCALATION_MODE", raising=False)
+    monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
+    out = vp.handle_booked_meeting(_demo(), _vp_icp_contact(), booker="U123")
+    assert out["action"] == "nudge"
+    assert "<@U123>" in out["text"]
+    assert "Zac" in out["text"] and "Aman" in out["text"]
+
+
+def test_nudge_falls_back_to_team_without_booker(monkeypatch):
+    monkeypatch.delenv("VP_ESCALATION_MODE", raising=False)
+    monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
+    out = vp.handle_booked_meeting(_demo(), _vp_icp_contact(), booker=None)
+    assert out["action"] == "nudge" and "team" in out["text"]
+
+
+def test_auto_mode_still_available(monkeypatch):
+    monkeypatch.setenv("VP_ESCALATION_MODE", "auto")
     monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
     monkeypatch.setenv("VP_ESCALATION_DRYRUN", "1")
     out = vp.handle_booked_meeting(_demo(), _vp_icp_contact(), {"aman": 10, "zac": 20})
     assert out["action"] == "auto_add"
-    assert "Aman" in out["thread_flag"] and "Auto-added" in out["thread_flag"]
+    assert out["result"]["performed"] is False  # dry-run, no write
 
 
 def test_add_guest_suppresses_prospect_email():

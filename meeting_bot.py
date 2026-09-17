@@ -1408,12 +1408,13 @@ def _log_comment(parsed, is_conference, poster=None, history=None):
     return '\n'.join(lines)
 
 
-def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, gcal_event_id=None,
-                       organizer_cal=None):
+def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None,
+                       gcal_event_id=None, organizer_cal=None):
     """VP+ ICP escalation hook. Fully guarded — never breaks the booking flow.
 
-    Off unless VP_ESCALATION_ENABLED=1. In dry-run (default) it only logs/says what
-    it would do; no calendar write, no prospect email. See docs/vp_escalation.md.
+    Default mode = nudge: @mention the booker to add Zac/Aman (no calendar access).
+    Off unless VP_ESCALATION_ENABLED=1. In dry-run it only logs; posts nothing.
+    See docs/vp_escalation.md.
     """
     try:
         import vp_escalation as vp
@@ -1422,30 +1423,33 @@ def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, gcal_event_id=None
         contact = vp.contact_from_parsed(parsed)
         meeting = {
             'id': meeting_id,
-            'event_id': gcal_event_id or f'hs-{meeting_id}',   # real GCal id later
+            'event_id': gcal_event_id or f'hs-{meeting_id}',   # only used by auto mode
             'meeting_type': parsed.get('meeting_type', 'demo'),
             'company': parsed.get('company_name'),
-            'attendees': [],                # TODO: read GCal attendees for live idempotency
+            'attendees': [],
             'calendar_id': organizer_cal,
         }
-        # Free/busy window (best-effort); missing time -> round-robin (busy 0/0).
+        # Free/busy only matters for the Google-Calendar modes (auto/propose/digest);
+        # the default nudge mode ignores it.
         busy = {'aman': 0, 'zac': 0}
         t_utc = parsed.get('meeting_time_utc')
-        if date_str and t_utc:
+        if vp.mode() != 'nudge' and date_str and t_utc:
             start = f'{date_str}T{t_utc}:00Z' if len(t_utc) <= 5 else f'{date_str}T{t_utc}Z'
-            end = start  # a point window is enough for the freeBusy overlap check
             for who in ('aman', 'zac'):
-                busy[who] = vp.freebusy(who, start, end) or 0
-        action = vp.handle_booked_meeting(meeting, contact, busy)
+                busy[who] = vp.freebusy(who, start, start) or 0
+        action = vp.handle_booked_meeting(meeting, contact, busy, booker=poster)
         act = action.get('action')
         if act == 'none':
             return
-        # Dry-run: log only. Never post to Slack (a "would add" is not an "added").
+        # Dry-run: log only, post nothing.
         if vp.dry_run():
-            print(f'[vp-escalate][dry-run] would {act} exec={action.get("exec")} '
+            print(f'[vp-escalate][dry-run] would {act} '
                   f'mtg={meeting_id} company={parsed.get("company_name")}', flush=True)
             return
-        if act == 'auto_add' and say and ts:
+        if act == 'nudge' and say and ts:
+            say(text=action['text'], thread_ts=ts)
+            print(f'[vp-escalate] nudged booker on mtg={meeting_id}', flush=True)
+        elif act == 'auto_add' and say and ts:
             say(text=action['thread_flag'], thread_ts=ts)
             print(f'[vp-escalate] {action}', flush=True)
         elif act == 'propose' and say and ts:
@@ -1609,7 +1613,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if _note:
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
-        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts)
+        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster)
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no
@@ -1717,7 +1721,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if note:
             say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
-        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts)
+        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts, poster=poster)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 
