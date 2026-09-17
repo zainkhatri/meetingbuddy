@@ -1226,18 +1226,6 @@ def handle_message(event, client, say, logger):
     if not bookings:
         return
 
-    # Test channel: run the real parse -> ICP -> VP+ nudge, but NO HubSpot writes
-    # (no contact/company/meeting/deal). Lets us exercise the nudge end-to-end
-    # safely. Posts treated as demos so any VP+ ICP booking fires.
-    _test_ch = os.environ.get('VP_ESCALATION_TEST_CHANNEL')
-    if _test_ch and event.get('channel') == _test_ch:
-        for parsed in bookings:
-            parsed['meeting_type'] = 'demo'
-            _maybe_vp_escalate(parsed, f'test-{ts}', parsed.get('meeting_date'),
-                               say, ts, poster=user_id)
-        print(f'[test] escalation-only run in test channel ts={ts}', flush=True)
-        return
-
     owner_id = slack_user_to_owner(client, user_id)
     # No BDR mapping → the meeting will be created but uncredited (no owner /
     # sdr_owner). Warn in-thread so it's fixed rather than silently missing from
@@ -1520,6 +1508,17 @@ def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None,
 
 
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, poster=None):
+    # Test channel: run the real parse -> ICP -> VP+ nudge, but write NOTHING to
+    # HubSpot (no contact/company/meeting/deal). Guard lives here so EVERY caller
+    # (live handler, replay, live-sweep) is covered. Posts treated as demos.
+    _test_ch = os.environ.get('VP_ESCALATION_TEST_CHANNEL')
+    if _test_ch and channel == _test_ch:
+        parsed['meeting_type'] = 'demo'
+        _maybe_vp_escalate(parsed, f'test-{ts}', parsed.get('meeting_date'),
+                           say, ts, poster=poster)
+        print(f'[test] escalation-only (no HubSpot) in test channel ts={ts}', flush=True)
+        return
+
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
     last = parsed.get('contact_last_name')
