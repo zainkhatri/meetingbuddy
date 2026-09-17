@@ -1147,8 +1147,7 @@ def handle_claim_account(ack, body, client, action):
                 _update(orig)                                # restore button — save failed
                 client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
             _WEEK_COUNT[sdr] += 1                            # count only a confirmed claim
-    name = props.get('name') or cid
-    client.chat_postEphemeral(channel=ch, user=uid, text=f"✅ {name} is yours.")
+    name = props.get('name') or cid                         # public greyed row is the confirmation; no ephemeral
     # DM the previous owner, if we can map them
     prev = payload['claimed_from']
     prev_uid = SDR_SLACK_REV.get(prev)
