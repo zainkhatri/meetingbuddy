@@ -1349,6 +1349,47 @@ def _log_comment(parsed, is_conference, poster=None, history=None):
     return '\n'.join(lines)
 
 
+def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, gcal_event_id=None,
+                       organizer_cal=None):
+    """VP+ ICP escalation hook. Fully guarded — never breaks the booking flow.
+
+    Off unless VP_ESCALATION_ENABLED=1. In dry-run (default) it only logs/says what
+    it would do; no calendar write, no prospect email. See docs/vp_escalation.md.
+    """
+    try:
+        import vp_escalation as vp
+        if not vp.enabled():
+            return
+        contact = vp.contact_from_parsed(parsed)
+        meeting = {
+            'id': meeting_id,
+            'event_id': gcal_event_id or f'hs-{meeting_id}',   # real GCal id later
+            'meeting_type': parsed.get('meeting_type', 'demo'),
+            'company': parsed.get('company_name'),
+            'attendees': [],                # TODO: read GCal attendees for live idempotency
+            'calendar_id': organizer_cal,
+        }
+        # Free/busy window (best-effort); missing time -> round-robin (busy 0/0).
+        busy = {'aman': 0, 'zac': 0}
+        t_utc = parsed.get('meeting_time_utc')
+        if date_str and t_utc:
+            start = f'{date_str}T{t_utc}:00Z' if len(t_utc) <= 5 else f'{date_str}T{t_utc}Z'
+            end = start  # a point window is enough for the freeBusy overlap check
+            for who in ('aman', 'zac'):
+                busy[who] = vp.freebusy(who, start, end) or 0
+        action = vp.handle_booked_meeting(meeting, contact, busy)
+        act = action.get('action')
+        if act == 'auto_add' and say and ts:
+            say(text=action['thread_flag'], thread_ts=ts)
+            print(f'[vp-escalate] {action}', flush=True)
+        elif act == 'propose' and say and ts:
+            say(blocks=action['blocks'], text='VP+ ICP meeting — add an exec?', thread_ts=ts)
+        elif act == 'digest':
+            print(f'[vp-escalate] digest: {action}', flush=True)
+    except Exception as e:
+        print(f'[vp-escalate] skipped (non-fatal): {e}', flush=True)
+
+
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, poster=None):
     company_name = parsed.get('company_name')
     first = parsed.get('contact_first_name')
@@ -1502,6 +1543,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if _note:
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
+        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts)
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no
@@ -1609,6 +1651,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if note:
             say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
+        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 

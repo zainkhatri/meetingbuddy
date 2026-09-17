@@ -1,0 +1,103 @@
+# FurtherAI ICP — machine-readable single source of truth.
+#
+# This file is the ONE place ICP is defined. Every consumer (conference_buddy,
+# crm/hubspot classifier, outreach/autoemail, NEXUS-FAI) and the HubSpot mirror
+# derive from it. Prose companion: icp.md. Drift enforced by check_sync.py.
+#
+# Authoritative source: FurtherAI Q2 2026 GTM review one-pager (Aman/Zac).
+# Conflicts with any older encoding resolve in favor of THIS file.
+
+icp_version: "2026-09-16"
+
+# ── Segments ────────────────────────────────────────────────────────────────
+# icp  = pursue (P&C operators + reinsurance brokers)
+# mid  = worth knowing, never pursued, never DNC (pure reinsurers)
+# deny = out regardless of size or seniority
+segments:
+  icp:
+    - p&c_carrier
+    - broker
+    - wholesaler
+    - mga
+    - reinsurance_broker      # places re on behalf of ceding insurers = broker ops
+  mid:
+    - reinsurer               # pure reinsurers + reinsurance arms of hybrids
+  deny:
+    - life
+    - health
+    - life_reinsurer
+    - tpa                     # third-party administrators
+    - insurtech
+    - saas
+    - consultancy
+    - advisory
+    - law_firm
+    - academic
+    - government
+    - non_profit
+    - captive_mgmt
+    - risk_mgmt_consultancy
+    - cvc                     # corporate venture arms
+    - asset_mgmt              # incl. ILS / cat-bond funds
+
+# ── Size bands (employee headcount) ──────────────────────────────────────────
+# 200+ ideal; under 50 is out. Bands drive the seniority cap below.
+size_bands:
+  - {name: floor, min: 0,    max: 49,   rule: out}         # under 50 -> out
+  - {name: mid,   min: 50,   max: 199,  rule: warm_cap}    # Director/AVP capped to warm
+  - {name: large, min: 200,  max: 1999, rule: warm_cap}    # same cap; ideal floor is 200
+  - {name: mega,  min: 2000, max: null, rule: no_cap}      # "very largest" -> Director+ ok
+# When headcount is unknown: do NOT demote on size. Note "size unverified".
+size_unknown_policy: no_demotion
+
+# ── Seniority x size -> outreach tier ────────────────────────────────────────
+# Tiers: priority (1) | warm (2) | okay (3) | skip
+seniority_x_size:
+  vp_plus:                    # VP, SVP, EVP, C-suite, President, Chief*
+    default: priority         # VP+ is priority at any ICP-size company
+  director:                   # Director, Sr Director, Head of, AVP
+    mega: priority            # Director+ priority ONLY at >=2000 employees
+    large: warm
+    mid: warm
+    floor: okay
+  manager:
+    default: warm
+  ic:
+    default: okay
+
+# ── Roles / functions ────────────────────────────────────────────────────────
+# allow: buyer functions. deny: non-buyer functions (skip even if senior).
+roles:
+  allow:
+    - leadership
+    - operations
+    - underwriting
+    - claims
+    - distribution
+    - innovation              # IN per one-pager (autoemail/NEXUS wrongly excluded this)
+  deny:
+    - cvc
+    - corp_dev
+    - m&a
+    - biz_dev_leadership
+    - information_technology
+    - fraud_siu
+    - human_resources
+    - legal
+    - marketing
+    - actuarial
+    - finance_accounting
+    - sales_sdr_bdr
+    - customer_support
+    - intern
+    - admin
+
+# ── Geography ─────────────────────────────────────────────────────────────────
+# US P&C focus. International-only operations disqualify; US ops material = ok.
+geography:
+  focus: us
+  international_only: disqualify
+
+# ── Known-brand override ──────────────────────────────────────────────────────
+# Nationally recognized US P&C brands bypass size gates -> icp=true.
+known_brand_override: true
