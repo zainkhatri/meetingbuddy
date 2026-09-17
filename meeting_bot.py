@@ -1424,6 +1424,13 @@ def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, gcal_event_id=None
                 busy[who] = vp.freebusy(who, start, end) or 0
         action = vp.handle_booked_meeting(meeting, contact, busy)
         act = action.get('action')
+        if act == 'none':
+            return
+        # Dry-run: log only. Never post to Slack (a "would add" is not an "added").
+        if vp.dry_run():
+            print(f'[vp-escalate][dry-run] would {act} exec={action.get("exec")} '
+                  f'mtg={meeting_id} company={parsed.get("company_name")}', flush=True)
+            return
         if act == 'auto_add' and say and ts:
             say(text=action['thread_flag'], thread_ts=ts)
             print(f'[vp-escalate] {action}', flush=True)
