@@ -96,6 +96,10 @@ def add_booking(state, user_id, name, msg_ts, delta=1, detail=None):
 def undo_last(state, user_id):
     """Remove the most recent positive booking event for user_id.
 
+    The message ts is intentionally KEPT in processed_ts so the undo is
+    permanent: a later replay/sweep of the still-present booking post will
+    dedup-skip it and never re-credit the count.
+
     Returns the rep's new total, or None if they have nothing to undo.
     """
     assert isinstance(state, dict) and "events" in state, "state must be a state dict"
@@ -107,9 +111,7 @@ def undo_last(state, user_id):
             if rec is None:
                 return None
             rec["count"] = max(0, rec["count"] - ev["delta"])
-            state["events"].pop(i)
-            if ev["ts"] in state["processed_ts"]:
-                state["processed_ts"].remove(ev["ts"])
+            state["events"].pop(i)  # keep ev["ts"] in processed_ts: undo is permanent
             return rec["count"]
     return None
 
