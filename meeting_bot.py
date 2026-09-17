@@ -39,6 +39,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 import sheet_sync
 import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
+import blitz_hook  # ITC blitz leaderboard; inert unless BLITZ_CHANNEL_ID is set
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -1177,6 +1178,15 @@ def handle_claim_account(ack, body, client, action):
 def handle_message(event, client, say, logger):
     # Bot messages: skip
     if event.get('bot_id'):
+        return
+    # ITC blitz leaderboard: divert blitz-channel messages to the isolated hook
+    # and return, so they never enter the booking pipeline. Fully inert unless
+    # BLITZ_CHANNEL_ID is set; wrapped so a blitz error can never affect bookings.
+    if blitz_hook.BLITZ_CHANNEL_ID and event.get('channel') == blitz_hook.BLITZ_CHANNEL_ID:
+        try:
+            blitz_hook.handle(event, client, parse_with_claude)
+        except Exception as e:
+            print(f'[blitz] handler error: {e}', flush=True)
         return
     subtype = event.get('subtype')
     # Edits: extract the new message and reprocess. Downstream HubSpot lookups
