@@ -128,6 +128,10 @@ def handle(event, client, parse_fn):
             _refresh_board(client)
         return True
 
+    with _lock:
+        if ts in _state.get('processed_ts', []):
+            return False  # already counted (live handler or a prior replay/sweep pass)
+
     if not looks_like_booking(text):
         return False  # ordinary chatter never hits the Claude parser
     parsed = parse_fn(text)
