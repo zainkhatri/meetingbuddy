@@ -1075,6 +1075,14 @@ def _claim_lock(cid):
     with _CLAIM_LOCKS_GUARD:
         return _CLAIM_LOCKS.setdefault(cid, threading.Lock())
 
+_BDR_LOCKS = {}
+_BDR_GUARD = threading.Lock()
+_WEEK_COUNT = {}          # sdr -> claims counted this rolling week (in-process; race-free vs search lag)
+
+def _bdr_lock(sdr):
+    with _BDR_GUARD:
+        return _BDR_LOCKS.setdefault(sdr, threading.Lock())
+
 def weekly_claim_count(sdr):
     """Source-of-truth cap: accounts this BDR claimed in the last 7 days, counted from
     HubSpot (cross-message, cross-digest, race-resistant) — not from the Slack message."""
@@ -1100,26 +1108,31 @@ def handle_claim_account(ack, body, client, action):
                                   text="Only BDRs can claim these — this is BDR account recycling.")
         return
     # even-split cap: each BDR may claim ceil(digest_size / 5) per rolling week.
-    # cap value from the digest they're viewing; used-count from HubSpot (robust across digests).
+    # cap value comes from the digest they're viewing; the used-count is tracked in-process
+    # under a per-BDR lock (seeded once from HubSpot) so rapid clicks can't race the search index.
     msg = body.get('message', {})
     cap = claim_cap(count_company_rows(msg.get('blocks', [])))
-    if weekly_claim_count(sdr) >= cap:
-        client.chat_postEphemeral(channel=ch, user=uid,
-            text=f"You've hit your claim limit for this week ({cap}). More open up next Monday.")
-        return
-    with _claim_lock(cid):                                   # settle near-simultaneous clicks
-        r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
-                         params={'properties': 'name,sdr_owner,recycle_status,last_claim_by'}, timeout=30)
-        if not r or not r.ok:
-            client.chat_postEphemeral(channel=ch, user=uid, text="Couldn't reach the CRM — try again."); return
-        props = r.json().get('properties', {})
-        ok, payload = claim_decision(props, sdr)
-        if not ok:
-            client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
-        pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
-                            json={'properties': payload}, timeout=30)
-        if not pr or not pr.ok:
-            client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
+    with _bdr_lock(sdr):                                     # serialize a BDR's clicks (cap is race-free)
+        if sdr not in _WEEK_COUNT:
+            _WEEK_COUNT[sdr] = weekly_claim_count(sdr)       # seed once, then count in memory
+        if _WEEK_COUNT[sdr] >= cap:
+            client.chat_postEphemeral(channel=ch, user=uid,
+                text=f"You've hit your claim limit for this week ({cap}). More open up next Monday.")
+            return
+        with _claim_lock(cid):                               # settle two BDRs racing the same account
+            r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
+                             params={'properties': 'name,sdr_owner,recycle_status,last_claim_by'}, timeout=30)
+            if not r or not r.ok:
+                client.chat_postEphemeral(channel=ch, user=uid, text="Couldn't reach the CRM — try again."); return
+            props = r.json().get('properties', {})
+            ok, payload = claim_decision(props, sdr)
+            if not ok:
+                client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
+            pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
+                                json={'properties': payload}, timeout=30)
+            if not pr or not pr.ok:
+                client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
+            _WEEK_COUNT[sdr] += 1                            # count only a confirmed claim
     name = props.get('name') or cid
     client.chat_postEphemeral(channel=ch, user=uid, text=f"✅ {name} is yours.")
     # rewrite the claimed row -> "✅ Claimed by {sdr}" and drop its button
