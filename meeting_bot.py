@@ -38,7 +38,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 import sheet_sync
 import attribution
-from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV
+from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, cap_ok, mark_claimed
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -1086,6 +1086,13 @@ def handle_claim_account(ack, body, client, action):
         client.chat_postEphemeral(channel=ch, user=uid,
                                   text="You're not set up as an SDR, so you can't claim accounts.")
         return
+    # even-split cap: each BDR may claim ceil(digest_size / 5) from this week's digest
+    msg = body.get('message', {})
+    ok_cap, cap, used = cap_ok(msg.get('blocks', []), sdr)
+    if not ok_cap:
+        client.chat_postEphemeral(channel=ch, user=uid,
+            text=f"You've hit your claim limit for this week ({cap}). More open up next Monday.")
+        return
     with _claim_lock(cid):                                   # settle near-simultaneous clicks
         r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                          params={'properties': 'name,sdr_owner,recycle_status,last_claim_by'}, timeout=30)
@@ -1101,6 +1108,13 @@ def handle_claim_account(ack, body, client, action):
             client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
     name = props.get('name') or cid
     client.chat_postEphemeral(channel=ch, user=uid, text=f"✅ {name} is yours.")
+    # rewrite the claimed row -> "✅ Claimed by {sdr}" and drop its button
+    try:
+        client.chat_update(channel=ch, ts=msg['ts'],
+                           blocks=mark_claimed(msg.get('blocks', []), cid, sdr),
+                           text=msg.get('text', 'Up for grabs this week'))
+    except Exception as e:
+        print(f'[claim] message update failed: {e}', flush=True)
     # DM the previous owner, if we can map them
     prev = payload['claimed_from']
     prev_uid = SDR_SLACK_REV.get(prev)
