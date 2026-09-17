@@ -55,19 +55,24 @@ def _display_name(client, user_id):
 
 
 def _refresh_board(client):
-    """Post or update the pinned leaderboard. Caller holds _lock."""
+    """Repost the leaderboard at the bottom of the channel. Caller holds _lock.
+
+    We delete the previous board and post a fresh one so there is always exactly
+    ONE leaderboard and it sits at the bottom (where Slack lands you on open) —
+    no message pile-up. Deleting the bot's own message uses chat:write.
+    """
     rows = store.standings(_state)
     total = store.total_booked(_state)
     last = _state.get('last')
     blocks = render_blocks(rows, BLITZ_TITLE, total, last)
     text = render_text(rows, BLITZ_TITLE, total, last)
-    board_ts = _state.get('board_ts')
-    if board_ts:
+    old_ts = _state.get('board_ts')
+    if old_ts:
         try:
-            client.chat_update(channel=BLITZ_CHANNEL_ID, ts=board_ts, blocks=blocks, text=text)
-            return
+            client.chat_delete(channel=BLITZ_CHANNEL_ID, ts=old_ts)
         except Exception:
-            _state['board_ts'] = None
+            pass  # already gone or racing; the repost below is what matters
+    _state['board_ts'] = None
     try:
         resp = client.chat_postMessage(channel=BLITZ_CHANNEL_ID, blocks=blocks, text=text)
         _state['board_ts'] = resp['ts']
