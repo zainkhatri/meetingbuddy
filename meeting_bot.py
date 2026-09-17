@@ -38,7 +38,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 import sheet_sync
 import attribution
-from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, cap_ok, mark_claimed
+from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -1075,6 +1075,19 @@ def _claim_lock(cid):
     with _CLAIM_LOCKS_GUARD:
         return _CLAIM_LOCKS.setdefault(cid, threading.Lock())
 
+def weekly_claim_count(sdr):
+    """Source-of-truth cap: accounts this BDR claimed in the last 7 days, counted from
+    HubSpot (cross-message, cross-digest, race-resistant) — not from the Slack message."""
+    cutoff_ms = int((time.time() - 7 * 86400) * 1000)
+    body = {'filterGroups': [{'filters': [
+                {'propertyName': 'last_claim_by', 'operator': 'EQ', 'value': sdr},
+                {'propertyName': 'recycle_status', 'operator': 'EQ', 'value': 'active'},
+                {'propertyName': 'claim_date', 'operator': 'GTE', 'value': cutoff_ms}]}],
+            'limit': 1}
+    r = requests.post('https://api.hubapi.com/crm/v3/objects/companies/search',
+                      headers=HS, json=body, timeout=30)
+    return r.json().get('total', 0) if (r is not None and r.ok) else 0
+
 @app.action('claim_account')
 def handle_claim_account(ack, body, client, action):
     ack()
@@ -1084,12 +1097,13 @@ def handle_claim_account(ack, body, client, action):
     sdr = SDR_SLACK.get(uid)
     if not sdr:
         client.chat_postEphemeral(channel=ch, user=uid,
-                                  text="You're not set up as an SDR, so you can't claim accounts.")
+                                  text="Only BDRs can claim these — this is BDR account recycling.")
         return
-    # even-split cap: each BDR may claim ceil(digest_size / 5) from this week's digest
+    # even-split cap: each BDR may claim ceil(digest_size / 5) per rolling week.
+    # cap value from the digest they're viewing; used-count from HubSpot (robust across digests).
     msg = body.get('message', {})
-    ok_cap, cap, used = cap_ok(msg.get('blocks', []), sdr)
-    if not ok_cap:
+    cap = claim_cap(count_company_rows(msg.get('blocks', [])))
+    if weekly_claim_count(sdr) >= cap:
         client.chat_postEphemeral(channel=ch, user=uid,
             text=f"You've hit your claim limit for this week ({cap}). More open up next Monday.")
         return
