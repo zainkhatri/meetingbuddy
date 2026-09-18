@@ -26,9 +26,7 @@ def render_blocks(rows, title, total, last=None):
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn",
-                     "text": "_No meetings booked yet. Post a booking when you land one:_\n"
-                             "```MEETING BOOKED!\nJane Doe, VP Underwriting @ Acme\nSegment: Carrier\n"
-                             "Wed Sep 30 @ 12 PM PT\nSource: Cold Call```"},
+                     "text": "_No meetings booked yet. Booked meetings appear here automatically as AEs book them._"},
         })
         return blocks
 
