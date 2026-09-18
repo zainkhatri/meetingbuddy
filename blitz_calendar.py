@@ -28,7 +28,7 @@ import requests
 from google.oauth2 import service_account
 import google.auth.transport.requests as greq
 
-from leaderboard import render_blocks, render_text
+from leaderboard import render_blocks, render_canvas_markdown, render_text
 
 DOMAIN = "furtherai.com"
 CAL_API = "https://www.googleapis.com/calendar/v3"
@@ -256,39 +256,71 @@ def _save_state(state):
     os.replace(tmp, STATE_PATH)
 
 
+def _canvas_edit(token, canvas_id, markdown):
+    """Update a Slack Canvas with new markdown content."""
+    assert canvas_id and token and markdown, "all args required"
+    r = requests.post("https://slack.com/api/canvases.edit",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"canvas_id": canvas_id, "changes": [{"operation": "replace",
+              "document_content": {"type": "markdown", "markdown": markdown}}]},
+        timeout=15)
+    return r.json().get("ok", False)
+
+
+def _canvas_create(token, markdown):
+    """Create a new Slack Canvas and return its id."""
+    assert token and markdown, "token and markdown required"
+    r = requests.post("https://slack.com/api/canvases.create",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"title": BLITZ_TITLE,
+              "document_content": {"type": "markdown", "markdown": markdown}},
+        timeout=15)
+    d = r.json()
+    return d.get("canvas_id") if d.get("ok") else None
+
+
 def refresh_board(client, rows):
-    """Bump-to-bottom board: one message, reposted only when standings change."""
+    """Update the Canvas leaderboard; post a block-kit message fallback in the channel."""
     assert isinstance(rows, list), "rows must be a list"
-    # Show all AEs (including 0) so the full roster is visible from the start.
-    # Sort by count desc, then name asc; 0s sink to the bottom alphabetically.
     disp = sorted(rows, key=lambda t: (-t[1], t[0].lower()))
     total = sum(c for _, c in rows)
-    blocks = render_blocks(disp, BLITZ_TITLE, total)
-    text = render_text(disp, BLITZ_TITLE, total)
-    # Signature covers the fully rendered board, so copy/title changes (not just
-    # standings) trigger a repost.
-    sig = json.dumps(blocks, sort_keys=True)
-    st = _load_state()
-    if sig == st.get("sig") and st.get("board_ts"):
+    md  = render_canvas_markdown(disp, BLITZ_TITLE, total)
+    sig = json.dumps(md)
+    st  = _load_state()
+    if sig == st.get("sig") and st.get("canvas_id"):
         return  # nothing changed
-    old = st.get("board_ts")
-    if old:
-        try:
-            client.chat_delete(channel=BLITZ_CHANNEL_ID, ts=old)
-        except Exception:
-            pass
-    try:
-        resp = client.chat_postMessage(channel=BLITZ_CHANNEL_ID, blocks=blocks, text=text)
-    except Exception as e:
-        print(f"[blitz] board post failed: {e}", flush=True)
-        return
-    st["board_ts"] = resp["ts"]
-    st["sig"] = sig
-    try:
-        client.pins_add(channel=BLITZ_CHANNEL_ID, timestamp=resp["ts"])
-    except Exception:
-        pass
-    _save_state(st)
+
+    token = client.token  # bolt App exposes token on .client
+    canvas_id = st.get("canvas_id")
+
+    # Update or create the canvas
+    if canvas_id:
+        ok = _canvas_edit(token, canvas_id, md)
+        if not ok:
+            canvas_id = None  # canvas gone — recreate
+    if not canvas_id:
+        canvas_id = _canvas_create(token, md)
+        if canvas_id:
+            # Post a pinned channel message linking to the canvas
+            try:
+                link_resp = client.chat_postMessage(
+                    channel=BLITZ_CHANNEL_ID,
+                    text=f"📊 *Live leaderboard:* <https://app.slack.com/docs/{canvas_id}|{BLITZ_TITLE}>  — updates every 60s automatically")
+                st["board_ts"] = link_resp["ts"]
+                try:
+                    client.pins_add(channel=BLITZ_CHANNEL_ID, timestamp=link_resp["ts"])
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[blitz] canvas link post failed: {e}", flush=True)
+
+    if canvas_id:
+        st["canvas_id"] = canvas_id
+        st["sig"] = sig
+        _save_state(st)
+        print(f"[blitz] canvas updated ({canvas_id})", flush=True)
+    else:
+        print("[blitz] canvas create/update failed", flush=True)
 
 
 def run_poller(client):
