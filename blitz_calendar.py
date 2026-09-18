@@ -220,12 +220,14 @@ def refresh_board(client, rows):
     assert isinstance(rows, list), "rows must be a list"
     disp = sorted([(n, c) for n, c in rows if c > 0], key=lambda t: (-t[1], t[0].lower()))
     total = sum(c for _, c in rows if c > 0)
-    sig = json.dumps(disp)
+    blocks = render_blocks(disp, BLITZ_TITLE, total)
+    text = render_text(disp, BLITZ_TITLE, total)
+    # Signature covers the fully rendered board, so copy/title changes (not just
+    # standings) trigger a repost.
+    sig = json.dumps(blocks, sort_keys=True)
     st = _load_state()
     if sig == st.get("sig") and st.get("board_ts"):
         return  # nothing changed
-    blocks = render_blocks(disp, BLITZ_TITLE, total)
-    text = render_text(disp, BLITZ_TITLE, total)
     old = st.get("board_ts")
     if old:
         try:
