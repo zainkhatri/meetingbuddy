@@ -1190,6 +1190,7 @@ def handle_message(event, client, say, logger):
         text = (msg.get('text') or '').strip()
         user_id = msg.get('user')
         ts = msg.get('ts')
+        thread_ts = msg.get('thread_ts')
     elif subtype:
         # Other subtypes (channel_join, message_deleted, etc.) — skip
         return
@@ -1197,10 +1198,18 @@ def handle_message(event, client, say, logger):
         text = (event.get('text') or '').strip()
         user_id = event.get('user')
         ts = event.get('ts')
+        thread_ts = event.get('thread_ts')
     if not text or not ts:
         return
     if _is_conference_reply(event, ts):
         _handle_conference_reply(event['thread_ts'], text, say)
+        return
+    # Thread replies are discussion (Q&A under an announcement, banter), not new
+    # bookings — real bookings are always new top-level posts. Conference-replies are
+    # the only actionable threaded case and were handled just above. Skip any other
+    # in-thread message so channel chatter is never mis-flagged as a booking.
+    if thread_ts and thread_ts != ts:
+        print(f'[live] skip: thread reply (not a booking) ts={ts}', flush=True)
         return
     if not _claim_ts(ts):
         print(f'[live] ts={ts} already claimed (sweep beat us) — skipping')
