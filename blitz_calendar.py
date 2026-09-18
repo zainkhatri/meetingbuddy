@@ -46,7 +46,7 @@ BLITZ_TITLE         = os.environ.get("BLITZ_TITLE", "AE Blitz: Booked Meetings")
 BLITZ_POLL_SECS     = int(os.environ.get("BLITZ_POLL_SECS", "300"))
 CONF_MEETINGS_CH    = os.environ.get("CONF_MEETINGS_CHANNEL", "C0B9Z8562RL")  # #conference-meetings
 MAX_PAGES           = 20  # bounded pagination
-_EMAIL_RE           = re.compile(r"[\w.+-]+@([\w-]+\.[\w.]+)")  # extract domains from text
+_EMAIL_RE           = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")  # extract full emails from text
 
 # Known BDR/SDR emails — any calendar event with one of these as an attendee
 # (when the AE is NOT the organizer) is a BDR-sourced meeting and is excluded.
@@ -140,21 +140,19 @@ def has_bdr_attendee(ev, ae_email):
     return False
 
 
-def fetch_bdr_domains(slack_token, start, end):
-    """Read #conference-meetings for the blitz window; return set of external domains
-    that BDRs posted bookings for. Any AE calendar event whose guests are all in
-    this set was booked by a BDR, not the AE.
+def fetch_bdr_contacts(slack_token, start, end):
+    """Read #conference-meetings for the blitz window; return set of specific contact
+    emails BDRs posted bookings for.
 
-    Uses a simple email-regex scan — no Claude parse — so it only matches when
-    the BDR included the prospect's email in their post (which meetingbuddy needs
-    for HubSpot contact creation, so it's almost always present).
+    Email-level (not domain-level): a BDR booking jane@acme.com does NOT block an
+    AE from getting credit for booking john@acme.com — a different person at the
+    same company. Only the exact person booked by a BDR is excluded.
+
+    Extends window to now so late Slack posts (BDRs post after creating the calendar
+    event) are always caught regardless of when the poller runs.
     """
     assert slack_token and start and end, "all args required"
-    bdr_domains = set()
-    # Extend the read window to NOW (not just end of blitz window) to catch late
-    # posts — BDRs book the meeting first (appears on AE calendar immediately),
-    # then post to #conference-meetings later. Reading only up to blitz_end would
-    # miss posts that arrive after the last poll of the day.
+    bdr_contacts = set()
     now = datetime.datetime.now(datetime.timezone.utc)
     read_until = max(end, now)
     try:
@@ -173,27 +171,29 @@ def fetch_bdr_domains(slack_token, start, end):
                 if m.get("bot_id") or m.get("subtype"):
                     continue
                 text = m.get("text", "")
-                for dom in _EMAIL_RE.findall(text):
-                    dom = dom.lower()
+                for email in _EMAIL_RE.findall(text):
+                    email = email.lower()
+                    dom = email.rsplit("@", 1)[-1]
                     if dom != DOMAIN and dom not in FREEMAIL:
-                        bdr_domains.add(dom)
+                        bdr_contacts.add(email)
             if not d.get("has_more"):
                 break
             params["cursor"] = d.get("response_metadata", {}).get("next_cursor", "")
     except Exception as e:
         print(f"[blitz] conference-meetings fetch failed: {e}", flush=True)
-    return bdr_domains
+    return bdr_contacts
 
 
-def count_bookings(events, ae_email, start, end, bdr_domains=None):
+def count_bookings(events, ae_email, start, end, bdr_contacts=None):
     """Count unique ITC meetings ae_email booked in [start, end].
 
-    bdr_domains: set of company domains BDRs posted in #conference-meetings.
-    Any event where ALL external guests are in bdr_domains is skipped (BDR did it).
+    bdr_contacts: set of specific contact emails BDRs posted in #conference-meetings.
+    An event is skipped only if ALL of its external guests were individually booked
+    by a BDR — a different person at the same company is fine.
     """
     assert isinstance(events, list), "events must be a list"
     assert start is not None and end is not None and start <= end, "valid window required"
-    bdr_domains = bdr_domains or set()
+    bdr_contacts = bdr_contacts or set()
     seen = set()
     n = 0
     for ev in events:
@@ -214,10 +214,11 @@ def count_bookings(events, ae_email, start, end, bdr_domains=None):
         # Primary BDR check (no timing race): BDR on invite + AE not the organizer
         if has_bdr_attendee(ev, ae_email):
             continue
-        # Secondary BDR check (catches late Slack posts): all external domains
-        # were posted by a BDR in #conference-meetings during/after the blitz window
-        guest_domains = {g.rsplit("@", 1)[-1].lower() for g in guests}
-        if bdr_domains and guest_domains and guest_domains.issubset(bdr_domains):
+        # Secondary BDR check (email-level, not domain): all specific guest emails
+        # were individually posted in #conference-meetings by a BDR.
+        # A different person at the same company is fine — must be exact email match.
+        guest_emails = {g.lower() for g in guests}
+        if bdr_contacts and guest_emails and guest_emails.issubset(bdr_contacts):
             continue
         key = ev.get("recurringEventId") or ev.get("id")
         if not key or key in seen:
@@ -284,14 +285,14 @@ def poll_once(sa_info, aes, start, end, slack_token=None):
     assert isinstance(aes, list), "aes must be a list"
     out = {}
     umin = start.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    # Fetch BDR-booked domains from #conference-meetings once per cycle
-    bdr_domains = fetch_bdr_domains(slack_token, start, end) if slack_token else set()
-    if bdr_domains:
-        print(f"[blitz] {len(bdr_domains)} BDR-booked domain(s) excluded from AE credit", flush=True)
+    # Fetch specific contact emails BDR-booked in #conference-meetings once per cycle
+    bdr_contacts = fetch_bdr_contacts(slack_token, start, end) if slack_token else set()
+    if bdr_contacts:
+        print(f"[blitz] {len(bdr_contacts)} BDR-booked contact(s) excluded from AE credit", flush=True)
     for ae in aes:
         try:
             evs = list_events(_token(sa_info, ae), umin)
-            out[ae] = count_bookings(evs, ae, start, end, bdr_domains)
+            out[ae] = count_bookings(evs, ae, start, end, bdr_contacts)
         except Exception as e:
             print(f"[blitz] {ae} poll failed: {e}", flush=True)
             out[ae] = None

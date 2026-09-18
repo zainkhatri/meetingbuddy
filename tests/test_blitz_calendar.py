@@ -93,23 +93,29 @@ def test_itc_title_required():
     assert c([ev(summary="itc exec meeting @ Summit")]) == 1  # case-insensitive
     assert c([ev(summary="FurtherAI ITC Vegas exec")]) == 1   # ITC anywhere in title
 
-def test_bdr_domain_excluded():
-    # BDR posted acme.com in #conference-meetings — AE's ITC meeting with acme.com is skipped
-    bdr_doms = {"acme-insurance.com"}
+def test_bdr_exact_email_excluded():
+    # BDR posted cfo@acme.com — AE meeting with that exact person is skipped
+    bdr_contacts = {"cfo@acme-insurance.com"}
     e = ev(summary="ITC // Acme exec meeting")
-    assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 0
+    assert bc.count_bookings([e], AE, START, END, bdr_contacts=bdr_contacts) == 0
 
-def test_non_bdr_domain_counts():
-    # BDR posted acme.com but this meeting is with beta.com — AE gets credit
-    bdr_doms = {"acme-insurance.com"}
+def test_bdr_different_person_same_company_counts():
+    # BDR posted cfo@acme.com but AE booked vp@acme.com — different person, counts
+    bdr_contacts = {"cfo@acme-insurance.com"}
+    e = ev(summary="ITC // Acme exec meeting", attendees=[{"email": "vp@acme-insurance.com"}])
+    assert bc.count_bookings([e], AE, START, END, bdr_contacts=bdr_contacts) == 1
+
+def test_bdr_non_contact_counts():
+    # BDR posted someone at acme, AE booked someone at beta — unrelated, counts
+    bdr_contacts = {"cfo@acme-insurance.com"}
     e = ev(summary="ITC // Beta Insurance", attendees=[{"email": "cfo@beta.com"}])
-    assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 1
+    assert bc.count_bookings([e], AE, START, END, bdr_contacts=bdr_contacts) == 1
 
-def test_mixed_domains_counts():
-    # Meeting has acme.com (BDR) + beta.com (AE own contact) — not all BDR, counts
-    bdr_doms = {"acme-insurance.com"}
+def test_mixed_contacts_counts():
+    # Meeting has BDR-booked person + AE's own contact — not all BDR, counts
+    bdr_contacts = {"cfo@acme-insurance.com"}
     e = ev(summary="ITC // Multi", attendees=[{"email": "cfo@acme-insurance.com"}, {"email": "vp@beta.com"}])
-    assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 1
+    assert bc.count_bookings([e], AE, START, END, bdr_contacts=bdr_contacts) == 1
 
 # --- BDR attendee tests ---
 _BDR = "jacob@furtherai.com"
