@@ -20,6 +20,7 @@ inputs validated, failures isolated per-AE.
 import datetime
 import json
 import os
+import random
 import threading
 import time
 
@@ -196,6 +197,46 @@ def poll_once(sa_info, aes, start, end):
     return out
 
 
+# ---- hype messages ---------------------------------------------------------
+
+_FIRST = [
+    "{name} drew first blood! 🩸",
+    "{name} is on the board! 🚀",
+    "{name} opened the account! 🎯",
+    "{name} gets us started! ⚡",
+]
+
+_ANY = [
+    "{name} is ON FIRE 🔥",
+    "{name} won't stop 🥷",
+    "{name} keeps COOKING 👨‍🍳",
+    "{name} with ANOTHER one 📞",
+    "{name} is locked in 🎯",
+    "{name} is DANGEROUS today 💀",
+    "{name} IS NOT SLOWING DOWN 🚂",
+    "{name} keeps the heat on 🌶️",
+    "{name} IS ON A TEAR ⚡",
+]
+
+_MILESTONE = "🚨 {name} just hit {count} meetings! UNSTOPPABLE 🚨"
+
+
+def _post_hype(client, name, new_count):
+    """Post a celebration message. Fire-and-forget — never blocks the board."""
+    assert isinstance(name, str) and name, "name required"
+    assert isinstance(new_count, int) and new_count >= 1, "count must be >= 1"
+    try:
+        if new_count % 5 == 0:
+            msg = _MILESTONE.format(name=name, count=new_count)
+        elif new_count == 1:
+            msg = random.choice(_FIRST).format(name=name)
+        else:
+            msg = random.choice(_ANY).format(name=name)
+        client.chat_postMessage(channel=BLITZ_CHANNEL_ID, text=msg)
+    except Exception as e:
+        print(f"[blitz] hype post failed for {name}: {e}", flush=True)
+
+
 # ---- board + loop ----------------------------------------------------------
 
 def _load_state():
@@ -272,6 +313,11 @@ def run_poller(client):
                 if c is None:
                     c = last.get(ae, 0)  # keep last-known on a read failure
                 else:
+                    prev = last.get(ae, 0)
+                    if c > prev:  # new booking detected — fire hype for each new one
+                        name = display_name(ae)
+                        for n in range(prev + 1, c + 1):  # bounded: at most MAX_BOOKINGS_PER_MSG
+                            _post_hype(client, name, n)
                     last[ae] = c
                 rows.append((display_name(ae), c))
             refresh_board(client, rows)
