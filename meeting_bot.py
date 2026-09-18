@@ -1979,9 +1979,13 @@ def exec_attach_pass(client):
     import vp_escalation as vp
     from datetime import datetime, timezone, timedelta
     lo = int((datetime.now(timezone.utc) - timedelta(hours=48)).timestamp() * 1000)
+    # meeting_type == 'demo' is REQUIRED: without it the sweep matches every synced
+    # meeting (internal syncs, customer implementation sessions, check-ins, conference
+    # touches) whose contact happens to be VP+ — and would add execs to all of them.
     body = {"filterGroups": [{"filters": [
                 {"propertyName": "hs_meeting_external_url", "operator": "HAS_PROPERTY"},
-                {"propertyName": "hs_createdate", "operator": "GTE", "value": str(lo)}]}],
+                {"propertyName": "hs_createdate", "operator": "GTE", "value": str(lo)},
+                {"propertyName": "meeting_type", "operator": "EQ", "value": "demo"}]}],
             "properties": ["hs_meeting_external_url", "hs_meeting_start_time", "hs_meeting_title"],
             "sorts": [{"propertyName": "hs_createdate", "direction": "DESCENDING"}], "limit": 50}
     r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
