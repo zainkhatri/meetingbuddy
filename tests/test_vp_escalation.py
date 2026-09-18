@@ -84,11 +84,15 @@ def test_round_robin_alternates(tmp_path, monkeypatch):
 
 
 # ── Dry-run performs no outward write ────────────────────────────────────────
-def test_add_guest_dryrun_does_nothing(monkeypatch):
+def test_add_guest_ignores_nudge_dryrun(monkeypatch):
+    # The nudge's dry-run flag must NOT block a real add_guest — the sweep controls
+    # its own dry-run. With ENABLED=1 + nudge DRYRUN=1 and no creds, it proceeds past
+    # the flag gate and fails only for lack of config (not "disabled_or_dryrun").
     monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
     monkeypatch.setenv("VP_ESCALATION_DRYRUN", "1")
+    monkeypatch.delenv("GOOGLE_CALENDAR_TOKEN_JSON", raising=False)
     r = vp.add_guest("evt1", "zac")
-    assert r["performed"] is False and r["reason"] == "disabled_or_dryrun"
+    assert r["performed"] is False and r["reason"] != "disabled_or_dryrun"
 
 
 def test_add_guest_disabled_does_nothing(monkeypatch):

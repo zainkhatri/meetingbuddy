@@ -189,9 +189,11 @@ def add_guest(event_id: str, exec_name: str, calendar_id: Optional[str] = None) 
     """Add an exec as a guest on the real GCal event. Idempotent + guarded.
 
     Adds with `sendUpdates=none` so the external prospect is NOT emailed a "new
-    attendee joined" notice — the exec still lands on the event (it shows on their
-    calendar) and the Slack thread flag announces it. Refuses to act unless ENABLED
-    and not DRYRUN, and no-ops if the exec is already on the event.
+    attendee joined" notice. Idempotent (no-ops if the exec is already on the event).
+
+    Dry-run is the CALLER's responsibility — the sweep gates on VP_EXEC_ATTACH_DRYRUN
+    before calling this. `add_guest` itself only respects the master ENABLED switch, so
+    silencing the nudge (VP_ESCALATION_DRYRUN=1) does NOT block the sweep's writes.
 
     calendar_id: the organizer/AE calendar the event lives on (an @furtherai.com
     address). Under domain-wide delegation the service account impersonates that
@@ -202,8 +204,8 @@ def add_guest(event_id: str, exec_name: str, calendar_id: Optional[str] = None) 
     cal = calendar_id or os.environ.get("VP_ORGANIZER_CALENDAR_ID", "primary")
     intent = {"action": "add_guest", "event_id": event_id, "exec": exec_name,
               "calendar": cal, "send_updates": "none"}
-    if not enabled() or dry_run():
-        return {**intent, "performed": False, "reason": "disabled_or_dryrun"}
+    if not enabled():
+        return {**intent, "performed": False, "reason": "disabled"}
     no_dwd = os.environ.get("VP_CALENDAR_NO_DWD") == "1"
     subject = cal if "@" in cal else os.environ.get("VP_CALENDAR_SUBJECT", "")
     if not no_dwd and not subject:
