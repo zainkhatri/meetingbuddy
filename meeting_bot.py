@@ -1477,80 +1477,44 @@ def _hs_owner_email(owner_id):
     return None
 
 
+def _vp_thread_has_nudge(client, channel, thread_ts):
+    """Dedup using Slack itself: True if a VP+ nudge already exists in this thread.
+    Durable across restarts and across every processing path, with no extra
+    datastore. Fails open (better a rare dup than to never nudge)."""
+    try:
+        rep = client.conversations_replies(channel=channel, ts=thread_ts, limit=50)
+        return any('VP+ ICP' in (m.get('text') or '') for m in rep.get('messages', []))
+    except Exception as e:
+        print(f'[vp-escalate] dedup check failed: {e}', flush=True)
+        return False
+
+
 def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner_id=None,
                        channel=None):
-    """VP+ ICP escalation hook. Fully guarded — never breaks the booking flow.
-
-    nudge mode: @mention the booker. auto mode: resolve the real GCal event and add
-    the freer exec (sendUpdates=none); if the event can't be found/added, FALL BACK
-    to the nudge so the meeting is never left uncovered. Off unless ENABLED=1.
+    """VP+ ICP escalation: post exactly ONE nudge in the booking thread asking the
+    booker to add Zac or Aman. Posts via the real Slack client so it fires from any
+    path (live/replay/sweep, not the sometimes-silent `say`), and dedups by scanning
+    the thread so it can never double-post. Fully guarded — never breaks booking.
+    (Calendar auto-add is parked pending a reconciler-based rebuild; the nudge is the
+    reliable, shipped behavior.)
     """
     try:
         import vp_escalation as vp
-        if not vp.enabled() or not (say and ts):
+        if not vp.enabled() or not (channel and ts):
             return
         contact = vp.contact_from_parsed(parsed)
         meeting = {'id': meeting_id, 'meeting_type': parsed.get('meeting_type', 'demo'),
                    'company': parsed.get('company_name'), 'attendees': []}
-        start_iso = None
-        t_utc = parsed.get('meeting_time_utc')
-        if date_str and t_utc:
-            start_iso = f'{date_str}T{t_utc}:00Z' if len(t_utc) <= 5 else f'{date_str}T{t_utc}Z'
-        busy = {'aman': 0, 'zac': 0}
-        if vp.mode() != 'nudge' and start_iso:
-            for who in ('aman', 'zac'):
-                busy[who] = vp.freebusy(who, start_iso, start_iso) or 0
-        action = vp.handle_booked_meeting(meeting, contact, busy, booker=poster)
-        act = action.get('action')
-        if act == 'none':
+        if not vp.is_escalation_candidate(meeting, contact):
             return
-
-        if act == 'nudge':
-            if vp.dry_run():
-                print(f'[vp-escalate][dry-run] would nudge mtg={meeting_id}', flush=True)
-                return
-            say(text=action['text'], thread_ts=ts)
-            print(f'[vp-escalate] nudged booker mtg={meeting_id}', flush=True)
+        if vp.dry_run():
+            print(f'[vp-escalate][dry-run] would nudge mtg={meeting_id}', flush=True)
             return
-
-        if act == 'auto':
-            exec_name = action['exec']
-            search_as = _hs_owner_email(owner_id)
-            terms = [t for t in [
-                parsed.get('company_name'),
-                f"{parsed.get('contact_first_name') or ''} {parsed.get('contact_last_name') or ''}".strip(),
-                parsed.get('contact_email')] if t]
-            eid, organizer = (vp.find_calendar_event(search_as, start_iso, terms)
-                              if (search_as and start_iso) else (None, None))
-            if vp.dry_run():
-                print(f'[vp-escalate][dry-run] auto exec={exec_name} event={eid} '
-                      f'org={organizer} mtg={meeting_id}', flush=True)
-                say(text=action['nudge_text'], thread_ts=ts)
-                return
-            if eid:
-                r = vp.add_guest(eid, exec_name, calendar_id=organizer)
-                if r.get('performed'):
-                    say(text=action['thread_flag'], thread_ts=ts)
-                    print(f'[vp-escalate] auto-added {exec_name} to event {eid} mtg={meeting_id}', flush=True)
-                    return
-                print(f'[vp-escalate] add failed ({r.get("reason")}); nudging mtg={meeting_id}', flush=True)
-            else:
-                print(f'[vp-escalate] event not synced yet; nudging + queuing retry mtg={meeting_id}', flush=True)
-            say(text=action['nudge_text'], thread_ts=ts)
-            # The GCal invite usually syncs a few minutes after the Slack post.
-            # Queue a retry so the exec gets auto-added once it appears (the nudge
-            # above is the immediate floor). Needs channel+ts to post the follow-up.
-            if search_as and start_iso and channel and ts:
-                vp.escalation_enqueue({
-                    'meeting_id': str(meeting_id), 'exec': exec_name, 'terms': terms,
-                    'start_iso': start_iso, 'search_as': search_as,
-                    'channel': channel, 'thread_ts': ts})
-            return
-
-        if act == 'propose':
-            say(blocks=action['blocks'], text='VP+ ICP meeting — add an exec?', thread_ts=ts)
-        elif act == 'digest':
-            print(f'[vp-escalate] digest: {action}', flush=True)
+        if _vp_thread_has_nudge(app.client, channel, ts):
+            return  # already nudged this booking — never repeat
+        text = vp.nudge_message(poster, meeting, contact)
+        app.client.chat_postMessage(channel=channel, thread_ts=ts, text=text)
+        print(f'[vp-escalate] nudged mtg={meeting_id}', flush=True)
     except Exception as e:
         print(f'[vp-escalate] skipped (non-fatal): {e}', flush=True)
 
