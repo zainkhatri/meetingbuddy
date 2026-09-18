@@ -10,7 +10,7 @@ OUT = "2026-09-17T12:00:00Z"     # before window
 AE = "nia@furtherai.com"
 
 
-def ev(created=IN, status="confirmed", summary="Acme + FurtherAI",
+def ev(created=IN, status="confirmed", summary="ITC // Acme + FurtherAI",
        organizer=None, attendees=None, eid="e1", rec=None):
     if organizer is None:
         organizer = {"self": True, "email": AE}
@@ -70,7 +70,7 @@ def test_dedup_by_id():
     assert c([ev(eid="x"), ev(eid="x")]) == 1
 
 def test_two_distinct_meetings():
-    assert c([ev(eid="a", summary="Acme"), ev(eid="b", summary="Beta Co",
+    assert c([ev(eid="a", summary="ITC // Acme"), ev(eid="b", summary="ITC // Beta Co",
               attendees=[{"email": "vp@beta-co.com"}])]) == 2
 
 def test_external_guests_helper():
@@ -86,3 +86,9 @@ def test_parse_iso():
 def test_display_name():
     assert bc.display_name("nia@furtherai.com") == "Nia"
     assert bc.display_name("jon.doe@furtherai.com") == "Jon Doe"
+
+def test_itc_title_required():
+    assert c([ev(summary="FurtherAI // Acme demo")]) == 0   # no ITC in title
+    assert c([ev(summary="ITC // Acme + FurtherAI")]) == 1  # has ITC
+    assert c([ev(summary="itc exec meeting @ Summit")]) == 1  # case-insensitive
+    assert c([ev(summary="FurtherAI ITC Vegas exec")]) == 1   # ITC anywhere in title

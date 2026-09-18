@@ -104,8 +104,14 @@ def attribution(ev, ae_email):
     return None
 
 
+def has_itc_title(ev):
+    """Event title must contain 'ITC' (case-insensitive) to count."""
+    assert isinstance(ev, dict), "ev must be a dict"
+    return "itc" in (ev.get("summary") or "").lower()
+
+
 def count_bookings(events, ae_email, start, end):
-    """Count unique meetings ae_email booked in [start, end]. Pure + testable."""
+    """Count unique ITC meetings ae_email booked in [start, end]. Pure + testable."""
     assert isinstance(events, list), "events must be a list"
     assert start is not None and end is not None and start <= end, "valid window required"
     seen = set()
@@ -114,6 +120,8 @@ def count_bookings(events, ae_email, start, end):
         if not isinstance(ev, dict):
             continue
         if is_cancelled(ev):
+            continue
+        if not has_itc_title(ev):
             continue
         created = parse_iso(ev.get("created"))
         if not created or created < start or created > end:
