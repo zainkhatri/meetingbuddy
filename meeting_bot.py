@@ -1227,17 +1227,16 @@ def handle_message(event, client, say, logger):
         return
 
     owner_id = slack_user_to_owner(client, user_id)
-    # No BDR mapping → the meeting will be created but uncredited (no owner /
-    # sdr_owner). Warn in-thread so it's fixed rather than silently missing from
-    # the dashboard. Expected for AE/teammate posters; a real gap for a BDR.
+    # Real bookings are posted by rostered BDRs. A non-BDR poster (exec/teammate
+    # chatting in the channel) is almost never a real booking — and the classifier
+    # biases toward is_booking=true. So if we can't map the poster to a BDR, skip
+    # SILENTLY (log only): no public warning, no celebration emojis, no processing.
+    # This prevents embarrassing false positives on ordinary channel discussion.
+    # (A genuine booking by an unrostered BDR is recoverable: roster them + repost.)
     if not owner_id:
-        print(f'[live] no owner mapping for slack user={user_id} — booking uncredited', flush=True)
-        try:
-            say(text=f"⚠️ Logged, but I couldn't map <@{user_id}> to a HubSpot BDR — this "
-                     "booking has **no owner/credit**. If they're a BDR, add them to the roster.",
-                thread_ts=ts)
-        except Exception as e:
-            print(f'[live] no-owner alert failed: {e}', flush=True)
+        print(f'[live] skip: no BDR mapping for slack user={user_id} — treating as '
+              f'non-booking chatter, not processed', flush=True)
+        return
     channel = event.get('channel')
     print(f'[live] handle_message ts={ts} channel={channel} bookings={len(bookings)}')
     _random_react(client, channel, ts, count=3)
