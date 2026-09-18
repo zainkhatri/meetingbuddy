@@ -1923,6 +1923,105 @@ def vp_retry_loop():
         time.sleep(120)
 
 
+# ── Exec-attach sweep: add Zac/Aman to VP+ ICP demos once the invite syncs ────
+def _ea_to_int(v):
+    try:
+        return int(float(str(v)))
+    except Exception:
+        return None
+
+
+def _meeting_icp_fields(meeting_id):
+    """(jobtitle, employees, segment) for a meeting's primary contact, from HubSpot."""
+    try:
+        a = requests.get(f'https://api.hubapi.com/crm/v4/objects/meetings/{meeting_id}/associations/contacts',
+                         headers=HS, timeout=15)
+        res = a.json().get('results', []) if a.ok else []
+        if not res:
+            return (None, None, None)
+        cid = res[0].get('toObjectId') or res[0].get('id')
+        c = requests.get(f'https://api.hubapi.com/crm/v3/objects/contacts/{cid}',
+                         headers=HS, params={'properties': 'jobtitle'}, timeout=15)
+        jt = (c.json().get('properties', {}) or {}).get('jobtitle') if c.ok else None
+        emp, seg = None, None
+        ca = requests.get(f'https://api.hubapi.com/crm/v4/objects/contacts/{cid}/associations/companies',
+                          headers=HS, timeout=15)
+        cres = ca.json().get('results', []) if ca.ok else []
+        if cres:
+            coid = cres[0].get('toObjectId') or cres[0].get('id')
+            co = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{coid}',
+                              headers=HS, params={'properties': 'numberofemployees,segment,type'}, timeout=15)
+            cp = co.json().get('properties', {}) if co.ok else {}
+            emp = _ea_to_int(cp.get('numberofemployees'))
+            seg = cp.get('segment') or cp.get('type')
+        return (jt, emp, seg)
+    except Exception as e:
+        print(f'[exec-attach] icp-fields error mtg={meeting_id}: {e}', flush=True)
+        return (None, None, None)
+
+
+_ATTACH_DONE = set()   # meeting ids handled this process (avoid re-querying every tick)
+
+
+def exec_attach_pass(client):
+    """One sweep: for recently-booked demos whose Google invite has synced, add the
+    freer exec to the real event (deterministic id from external_url; no search)."""
+    import vp_escalation as vp
+    from datetime import datetime, timezone, timedelta
+    lo = int((datetime.now(timezone.utc) - timedelta(hours=48)).timestamp() * 1000)
+    body = {"filterGroups": [{"filters": [
+                {"propertyName": "hs_meeting_external_url", "operator": "HAS_PROPERTY"},
+                {"propertyName": "hs_createdate", "operator": "GTE", "value": str(lo)}]}],
+            "properties": ["hs_meeting_external_url", "hs_meeting_start_time", "hs_meeting_title"],
+            "sorts": [{"propertyName": "hs_createdate", "direction": "DESCENDING"}], "limit": 50}
+    r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
+                      headers=HS, json=body, timeout=30)
+    if not r.ok:
+        print(f'[exec-attach] search failed {r.status_code}', flush=True)
+        return
+    for m in r.json().get('results', [])[:50]:      # bounded
+        mid = m.get('id')
+        if not mid or mid in _ATTACH_DONE:
+            continue
+        p = m.get('properties', {})
+        event_id, organizer = vp.decode_event_url(p.get('hs_meeting_external_url'))
+        if not (event_id and organizer):
+            continue
+        jt, emp, seg = _meeting_icp_fields(mid)
+        if not vp.exec_attach_ok(jt, emp, seg):
+            _ATTACH_DONE.add(mid)                    # not a target — don't recheck
+            continue
+        if vp.event_has_exec(organizer, event_id):
+            _ATTACH_DONE.add(mid)                    # already covered
+            continue
+        start_iso = p.get('hs_meeting_start_time')
+        busy = ({w: (vp.freebusy(w, start_iso, start_iso) or 0) for w in ('aman', 'zac')}
+                if start_iso else {'aman': 0, 'zac': 0})
+        who = vp.pick_exec(busy)
+        # Sweep has its own dry-run flag so we can observe it while the nudge stays live.
+        if os.environ.get('VP_EXEC_ATTACH_DRYRUN', '1') != '0':
+            print(f"[exec-attach][dry-run] would add {who} to event {event_id} "
+                  f"org={organizer} mtg={mid} title={p.get('hs_meeting_title')}", flush=True)
+            _ATTACH_DONE.add(mid)                    # log once per process
+            continue
+        res = vp.add_guest(event_id, who, calendar_id=organizer)
+        if res.get('performed') or res.get('reason') == 'already_present':
+            _ATTACH_DONE.add(mid)
+            print(f"[exec-attach] added {who} to event {event_id} mtg={mid}", flush=True)
+
+
+def exec_attach_loop():
+    """Every 2 min: attach execs to VP+ ICP demos whose invite has synced."""
+    import vp_escalation as vp
+    while True:
+        try:
+            if vp.enabled():
+                exec_attach_pass(app.client)
+        except Exception as e:
+            print(f'[exec-attach] loop error: {e}', flush=True)
+        time.sleep(120)
+
+
 # --- Startup replay: re-process the last 24h of Slack history ---
 # Catches messages posted while the bot was down (Railway restart, deploy,
 # socket disconnect). HubSpot lookups are idempotent — already-tagged
@@ -2572,7 +2671,7 @@ if __name__ == '__main__':
     threading.Thread(target=sheet_reconcile_loop, daemon=True).start()
     print('[reconcile] background sweep started (every 5 min)')
     threading.Thread(target=retry_loop, daemon=True).start()
-    threading.Thread(target=vp_retry_loop, daemon=True).start()
+    threading.Thread(target=exec_attach_loop, daemon=True).start()
     print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
     threading.Thread(target=replay_missed_messages, daemon=True).start()
     print('[replay] startup replay scheduled (last 24h)')

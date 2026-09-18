@@ -186,6 +186,30 @@ def test_pending_expires(monkeypatch):
     assert "m3" not in [e["meeting_id"] for e in vp.escalation_pending()]
 
 
+# ── Exec-attach sweep: deterministic event decode + sweep-time ICP gate ───────
+def test_decode_event_url_real_sample():
+    # Real HubSpot external_url eid from a synced demo.
+    url = ("https://www.google.com/calendar/event?eid="
+           "M2poc3Y5bm90b2NrYWpuZDRqdjQ0aW1wa2ogbmljay5uQGZ1cnRoZXJhaS5jb20")
+    eid, org = vp.decode_event_url(url)
+    assert eid == "3jhsv9notockajnd4jv44impkj"
+    assert org == "nick.n@furtherai.com"
+
+
+def test_decode_event_url_bad_input():
+    assert vp.decode_event_url("") == (None, None)
+    assert vp.decode_event_url("https://x/y?foo=bar") == (None, None)
+
+
+def test_exec_attach_ok_gate():
+    assert vp.exec_attach_ok("VP of Underwriting", 800, "carrier") is True
+    assert vp.exec_attach_ok("VP of Underwriting", None, None) is True     # unknowns -> include
+    assert vp.exec_attach_ok("Claims Manager", 800, "carrier") is False    # not VP+
+    assert vp.exec_attach_ok("VP Corporate Development", 800, "carrier") is False  # denied fn
+    assert vp.exec_attach_ok("VP Operations", 20, "carrier") is False      # sub-50
+    assert vp.exec_attach_ok("VP Operations", 800, "life") is False        # deny segment
+
+
 def test_add_guest_suppresses_prospect_email():
     # sendUpdates=none must always be the intent so the prospect isn't emailed.
     assert vp.add_guest("evt1", "zac")["send_updates"] == "none"

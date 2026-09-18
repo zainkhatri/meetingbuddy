@@ -24,6 +24,7 @@ idempotent writes.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -506,6 +507,42 @@ def find_calendar_event(search_as: str, start_iso: str, terms):
     except Exception:
         return (None, None)             # never break the booking flow
     return (None, None)
+
+
+def decode_event_url(external_url: str):
+    """Decode a HubSpot `hs_meeting_external_url` (Google Calendar link) to
+    (event_id, organizer_email). The `?eid=` param base64-decodes to
+    '<event_id> <organizer_email>'. Deterministic — no calendar search.
+    Returns (None, None) on any failure."""
+    if not external_url or "eid=" not in external_url:
+        return (None, None)
+    try:
+        eid = external_url.split("eid=", 1)[1].split("&", 1)[0].strip()
+        raw = base64.b64decode(eid + "=" * (-len(eid) % 4)).decode("utf-8", "replace")
+        parts = raw.split(" ")
+        event_id = parts[0] if parts and parts[0] else None
+        organizer = parts[1] if len(parts) >= 2 and "@" in parts[1] else None
+        return (event_id, organizer)
+    except Exception:
+        return (None, None)
+
+
+def exec_attach_ok(jobtitle: str, employees: Optional[int], segment=None) -> bool:
+    """Sweep-time ICP gate for exec-attach, from HubSpot fields. Requires VP+ in an
+    allowed function; excludes sub-50 companies and deny-segments. Errs toward
+    INCLUDE when size/segment are unknown (VP+ on a booked demo is a strong signal;
+    over-inclusion only adds an internal exec, never emails a prospect)."""
+    if _norm_seniority(jobtitle or "") != "vp_plus":
+        return False
+    if not icp.role_allowed(_norm_function(jobtitle or "")):
+        return False
+    if employees is not None and icp.size_band(employees) == "floor":
+        return False
+    if segment:
+        seg = _SEGMENT_MAP.get(str(segment).lower(), str(segment).lower())
+        if icp.segment_class(seg) == "deny":
+            return False
+    return True
 
 
 def event_has_exec(organizer_email: str, event_id: str) -> bool:
