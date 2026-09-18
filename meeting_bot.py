@@ -1477,7 +1477,8 @@ def _hs_owner_email(owner_id):
     return None
 
 
-def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner_id=None):
+def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner_id=None,
+                       channel=None):
     """VP+ ICP escalation hook. Fully guarded — never breaks the booking flow.
 
     nudge mode: @mention the booker. auto mode: resolve the real GCal event and add
@@ -1534,8 +1535,16 @@ def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner
                     return
                 print(f'[vp-escalate] add failed ({r.get("reason")}); nudging mtg={meeting_id}', flush=True)
             else:
-                print(f'[vp-escalate] event not found; nudging mtg={meeting_id}', flush=True)
+                print(f'[vp-escalate] event not synced yet; nudging + queuing retry mtg={meeting_id}', flush=True)
             say(text=action['nudge_text'], thread_ts=ts)
+            # The GCal invite usually syncs a few minutes after the Slack post.
+            # Queue a retry so the exec gets auto-added once it appears (the nudge
+            # above is the immediate floor). Needs channel+ts to post the follow-up.
+            if search_as and start_iso and channel and ts:
+                vp.escalation_enqueue({
+                    'meeting_id': str(meeting_id), 'exec': exec_name, 'terms': terms,
+                    'start_iso': start_iso, 'search_as': search_as,
+                    'channel': channel, 'thread_ts': ts})
             return
 
         if act == 'propose':
@@ -1710,7 +1719,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if _note:
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
-        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster, owner_id=owner_id)
+        _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster, owner_id=owner_id, channel=channel)
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no
@@ -1818,7 +1827,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         if note:
             say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
-        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts, poster=poster, owner_id=owner_id)
+        _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts, poster=poster, owner_id=owner_id, channel=channel)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 
@@ -1905,6 +1914,49 @@ def retry_loop():
         except Exception as e:
             print(f'[retry] loop error: {e}')
         time.sleep(300)
+
+
+def _vp_retry_pass(client):
+    """Re-attempt queued VP+ auto-adds. The GCal invite usually syncs minutes
+    after the Slack post, so we keep trying until it appears (or TTL). Idempotent:
+    skips if either exec is already on the invite; add_guest itself no-ops on dupes."""
+    import vp_escalation as vp
+    for ctx in vp.escalation_pending()[:50]:      # bounded
+        try:
+            eid, organizer = vp.find_calendar_event(ctx['search_as'], ctx['start_iso'], ctx['terms'])
+            if not eid:
+                continue                          # not synced yet — retry next tick
+            if vp.event_has_exec(organizer, eid):
+                vp.escalation_remove(ctx['meeting_id'])   # someone already added one
+                continue
+            r = vp.add_guest(eid, ctx['exec'], calendar_id=organizer)
+            if r.get('performed'):
+                try:
+                    client.chat_postMessage(
+                        channel=ctx['channel'], thread_ts=ctx['thread_ts'],
+                        text=f":white_check_mark: Auto-added *{ctx['exec'].capitalize()}* "
+                             f"to the invite.")
+                except Exception as e:
+                    print(f'[vp-retry] post failed: {e}', flush=True)
+                vp.escalation_remove(ctx['meeting_id'])
+                print(f"[vp-retry] auto-added {ctx['exec']} to event {eid} "
+                      f"mtg={ctx['meeting_id']}", flush=True)
+            elif r.get('reason') == 'already_present':
+                vp.escalation_remove(ctx['meeting_id'])
+        except Exception as e:
+            print(f"[vp-retry] error mtg={ctx.get('meeting_id')}: {e}", flush=True)
+
+
+def vp_retry_loop():
+    """Background loop driving _vp_retry_pass every 2 min (Bug-1 fix)."""
+    import vp_escalation as vp
+    while True:
+        try:
+            if vp.enabled() and not vp.dry_run():
+                _vp_retry_pass(app.client)
+        except Exception as e:
+            print(f'[vp-retry] loop error: {e}', flush=True)
+        time.sleep(120)
 
 
 # --- Startup replay: re-process the last 24h of Slack history ---
@@ -2556,6 +2608,7 @@ if __name__ == '__main__':
     threading.Thread(target=sheet_reconcile_loop, daemon=True).start()
     print('[reconcile] background sweep started (every 5 min)')
     threading.Thread(target=retry_loop, daemon=True).start()
+    threading.Thread(target=vp_retry_loop, daemon=True).start()
     print('[retry] background re-tag worker started (every 5 min, 24h TTL)')
     threading.Thread(target=replay_missed_messages, daemon=True).start()
     print('[replay] startup replay scheduled (last 24h)')

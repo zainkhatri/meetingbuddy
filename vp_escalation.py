@@ -28,6 +28,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -504,3 +506,58 @@ def find_calendar_event(search_as: str, start_iso: str, terms):
     except Exception:
         return (None, None)             # never break the booking flow
     return (None, None)
+
+
+def event_has_exec(organizer_email: str, event_id: str) -> bool:
+    """True if Aman OR Zac is already a guest on the event (someone added one
+    after the nudge). Lets the retry avoid a redundant second exec. Read-only."""
+    if not (organizer_email and event_id):
+        return False
+    try:
+        token = _gcal_token(subject=organizer_email)
+        if not token:
+            return False
+        import requests
+        r = requests.get(f"{_CAL_API}/calendars/{organizer_email}/events/{event_id}",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        r.raise_for_status()
+        emails = " ".join((a.get("email", "") or "").lower()
+                          for a in r.json().get("attendees", []) or [])
+        return any(_exec_calendar(x).lower() in emails for x in EXECS)
+    except Exception:
+        return False
+
+
+# ── Retry queue: keep trying to add the exec until the GCal invite syncs ──────
+# The invite usually doesn't exist at Slack-post time, so a single attempt fails.
+# We enqueue and retry for ESCALATION_TTL_SEC. In-memory (Railway disk is
+# ephemeral); the immediate nudge is the floor if a restart drops the queue.
+ESCALATION_TTL_SEC = 45 * 60
+_PENDING = []
+_PENDING_LOCK = threading.Lock()
+
+
+def escalation_enqueue(ctx: dict) -> None:
+    """Queue a pending auto-add. ctx needs meeting_id, exec, terms, start_iso,
+    search_as, channel, thread_ts. Deduped by meeting_id."""
+    assert ctx.get("meeting_id"), "meeting_id required"
+    assert ctx.get("exec") in EXECS, "valid exec required"
+    with _PENDING_LOCK:
+        for e in _PENDING:                 # bounded by real booking volume
+            if e["meeting_id"] == ctx["meeting_id"]:
+                return                     # already queued
+        ctx.setdefault("first_seen", time.time())
+        _PENDING.append(ctx)
+
+
+def escalation_pending() -> list:
+    """Return non-expired pending items; prune expired ones in place."""
+    now = time.time()
+    with _PENDING_LOCK:
+        _PENDING[:] = [e for e in _PENDING if now - e["first_seen"] < ESCALATION_TTL_SEC]
+        return list(_PENDING)
+
+
+def escalation_remove(meeting_id: str) -> None:
+    with _PENDING_LOCK:
+        _PENDING[:] = [e for e in _PENDING if e["meeting_id"] != meeting_id]

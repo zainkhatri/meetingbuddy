@@ -6,6 +6,7 @@ round-robin is deterministic across simulated restarts.
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import vp_escalation as vp  # noqa: E402
@@ -150,6 +151,39 @@ def test_find_calendar_event_safe_without_dwd(monkeypatch):
     # no-DWD or missing subject -> (None, None), never raises.
     monkeypatch.setenv("VP_CALENDAR_NO_DWD", "1")
     assert vp.find_calendar_event("ae@furtherai.com", "2026-10-02T18:00:00Z", ["X"]) == (None, None)
+
+
+# ── Retry queue (Bug 1 fix: keep trying until the invite syncs) ───────────────
+def _ctx(mid="m1", who="zac"):
+    return {"meeting_id": mid, "exec": who, "terms": ["Acme"],
+            "start_iso": "2026-10-02T18:00:00Z", "search_as": "bdr@furtherai.com",
+            "channel": "C1", "thread_ts": "123.45"}
+
+
+def test_enqueue_and_pending():
+    vp.escalation_remove("m1")
+    vp.escalation_enqueue(_ctx())
+    ids = [e["meeting_id"] for e in vp.escalation_pending()]
+    assert "m1" in ids
+    vp.escalation_remove("m1")
+    assert "m1" not in [e["meeting_id"] for e in vp.escalation_pending()]
+
+
+def test_enqueue_dedups_by_meeting():
+    vp.escalation_remove("m2")
+    vp.escalation_enqueue(_ctx("m2", "zac"))
+    vp.escalation_enqueue(_ctx("m2", "aman"))  # same meeting -> ignored
+    hits = [e for e in vp.escalation_pending() if e["meeting_id"] == "m2"]
+    assert len(hits) == 1 and hits[0]["exec"] == "zac"
+    vp.escalation_remove("m2")
+
+
+def test_pending_expires(monkeypatch):
+    vp.escalation_remove("m3")
+    c = _ctx("m3")
+    c["first_seen"] = time.time() - (vp.ESCALATION_TTL_SEC + 10)  # already expired
+    vp.escalation_enqueue(c)
+    assert "m3" not in [e["meeting_id"] for e in vp.escalation_pending()]
 
 
 def test_add_guest_suppresses_prospect_email():
