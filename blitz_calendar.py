@@ -48,6 +48,12 @@ CONF_MEETINGS_CH    = os.environ.get("CONF_MEETINGS_CHANNEL", "C0B9Z8562RL")  # 
 MAX_PAGES           = 20  # bounded pagination
 _EMAIL_RE           = re.compile(r"[\w.+-]+@([\w-]+\.[\w.]+)")  # extract domains from text
 
+# Known BDR/SDR emails — any calendar event with one of these as an attendee
+# (when the AE is NOT the organizer) is a BDR-sourced meeting and is excluded.
+# Configurable via BLITZ_BDRS env var (comma-separated) to avoid hardcoding.
+_DEFAULT_BDRS = "zain@furtherai.com,jacob@furtherai.com,daniella@furtherai.com,benjamin.t@furtherai.com,matthew@furtherai.com"
+BDR_EMAILS = {e.strip().lower() for e in os.environ.get("BLITZ_BDRS", _DEFAULT_BDRS).split(",") if e.strip()}
+
 
 def _state_path():
     return "/data/blitz_cal_state.json" if os.path.isdir("/data") else "blitz_cal_state.json"
@@ -113,6 +119,27 @@ def has_itc_title(ev):
     return "itc" in (ev.get("summary") or "").lower()
 
 
+def has_bdr_attendee(ev, ae_email):
+    """Return True if a known BDR is on the invite AND the AE is not the organizer.
+
+    If the AE organized the meeting and invited a BDR for support, that's the AE's
+    work — don't exclude it. But if the AE is just an attendee and a BDR is also
+    there, the BDR booked it.
+
+    This is the primary BDR exclusion signal — it's instantaneous (no timing race).
+    """
+    assert isinstance(ev, dict), "ev must be a dict"
+    assert isinstance(ae_email, str) and ae_email, "ae_email required"
+    o = ev.get("organizer") or {}
+    ae_is_organizer = o.get("self") or (o.get("email") or "").lower() == ae_email.lower()
+    if ae_is_organizer:
+        return False  # AE organized it — BDR is just support
+    for a in (ev.get("attendees") or []):
+        if (a.get("email") or "").lower() in BDR_EMAILS:
+            return True
+    return False
+
+
 def fetch_bdr_domains(slack_token, start, end):
     """Read #conference-meetings for the blitz window; return set of external domains
     that BDRs posted bookings for. Any AE calendar event whose guests are all in
@@ -124,10 +151,16 @@ def fetch_bdr_domains(slack_token, start, end):
     """
     assert slack_token and start and end, "all args required"
     bdr_domains = set()
+    # Extend the read window to NOW (not just end of blitz window) to catch late
+    # posts — BDRs book the meeting first (appears on AE calendar immediately),
+    # then post to #conference-meetings later. Reading only up to blitz_end would
+    # miss posts that arrive after the last poll of the day.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    read_until = max(end, now)
     try:
         params = {"channel": CONF_MEETINGS_CH,
                   "oldest": str(start.timestamp()),
-                  "latest": str(end.timestamp()),
+                  "latest": str(read_until.timestamp()),
                   "limit": 200, "inclusive": "true"}
         for _ in range(MAX_PAGES):  # bounded pagination
             r = requests.get("https://slack.com/api/conversations.history",
@@ -178,7 +211,11 @@ def count_bookings(events, ae_email, start, end, bdr_domains=None):
             continue
         if not attribution(ev, ae_email):
             continue
-        # Skip if every external guest domain was already posted in #conference-meetings
+        # Primary BDR check (no timing race): BDR on invite + AE not the organizer
+        if has_bdr_attendee(ev, ae_email):
+            continue
+        # Secondary BDR check (catches late Slack posts): all external domains
+        # were posted by a BDR in #conference-meetings during/after the blitz window
         guest_domains = {g.rsplit("@", 1)[-1].lower() for g in guests}
         if bdr_domains and guest_domains and guest_domains.issubset(bdr_domains):
             continue

@@ -110,3 +110,33 @@ def test_mixed_domains_counts():
     bdr_doms = {"acme-insurance.com"}
     e = ev(summary="ITC // Multi", attendees=[{"email": "cfo@acme-insurance.com"}, {"email": "vp@beta.com"}])
     assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 1
+
+# --- BDR attendee tests ---
+_BDR = "jacob@furtherai.com"
+
+def test_bdr_attendee_ae_not_organizer_excluded():
+    # BDR is on invite, exec is organizer, AE is attendee -> BDR booked it -> skip
+    org = {"self": False, "email": "cfo@acme.com"}
+    e = ev(summary="ITC // Acme", organizer=org,
+           attendees=[{"email": "cfo@acme.com"}, {"email": _BDR}])
+    assert bc.count_bookings([e], AE, START, END) == 0
+
+def test_bdr_attendee_ae_is_organizer_counts():
+    # AE organized the meeting AND invited BDR for support -> AE's work -> count
+    org = {"self": True, "email": AE}
+    e = ev(summary="ITC // Acme", organizer=org,
+           attendees=[{"email": "cfo@acme.com"}, {"email": _BDR}])
+    assert bc.count_bookings([e], AE, START, END) == 1
+
+def test_has_bdr_attendee_helper():
+    org_ae = {"self": True, "email": AE}
+    org_ext = {"self": False, "email": "cfo@acme.com"}
+    # BDR on invite, external organizer
+    assert bc.has_bdr_attendee(
+        {"organizer": org_ext, "attendees": [{"email": _BDR}, {"email": "cfo@acme.com"}]}, AE)
+    # BDR on invite, AE is organizer -> False (AE's meeting)
+    assert not bc.has_bdr_attendee(
+        {"organizer": org_ae, "attendees": [{"email": _BDR}, {"email": "cfo@acme.com"}]}, AE)
+    # No BDR on invite -> False
+    assert not bc.has_bdr_attendee(
+        {"organizer": org_ext, "attendees": [{"email": "cfo@acme.com"}]}, AE)
