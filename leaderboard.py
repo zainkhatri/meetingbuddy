@@ -82,13 +82,27 @@ def render_blocks(rows, title, total, last=None):
 
 
 def render_text(rows, title, total, last=None):
-    """Plain-text fallback (notifications / logs)."""
+    """Code-block leaderboard — primary display (monospace aligns the green bars)."""
     assert isinstance(rows, list), "rows must be a list"
     if not rows:
-        return f"{title}\nNo meetings booked yet."
+        return (f"*{title}*\n\n"
+                "_No meetings booked yet. Booked meetings appear here automatically._")
     max_count = max((c for _, c in rows), default=0)
-    body = "\n".join(
-        f"{_rank_label(i)} {name} {_bar(c, max_count or 1)} {c}"
-        for i, (name, c) in enumerate(rows[:25])
-    )
-    return f"{title}\n{body}\nTotal: {total}"
+    leaders = [r for r in rows if r[1] > 0]
+    zeroes  = [r for r in rows if r[1] == 0]
+    name_w  = max(len(n) for n, _ in rows) + 1
+    lines   = []
+    rank    = 0
+    for name, count in leaders[:25]:
+        label = _rank_label(rank)
+        bar   = _bar(count, max_count)
+        lines.append(f"{label} {name:{name_w}} {bar}  {count}")
+        rank += 1
+    if zeroes:
+        sep = "─" * (name_w + 16)
+        lines.append(sep)
+        for name, _ in zeroes[:25]:
+            lines.append(f"   {name:{name_w}} {_bar(0, max_count or 1)}  0")
+    lines.append("─" * (name_w + 16))
+    lines.append(f"🔥 {total} booked as a team")
+    return f"*{title}*\n\n```\n" + "\n".join(lines) + "\n```"
