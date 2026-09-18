@@ -28,7 +28,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 _CAL_API = "https://www.googleapis.com/calendar/v3"
@@ -150,12 +150,20 @@ def freebusy(exec_name: str, start_iso: str, end_iso: str) -> Optional[int]:
     assert exec_name in EXECS, f"unknown exec: {exec_name}"
     assert start_iso and end_iso, "window required"
     cal = _exec_calendar(exec_name)
+    # Guard against a zero/negative window (callers often pass start==start): a
+    # zero-width freeBusy query always returns no busy blocks, which would make
+    # every exec look equally free and defeat the "pick the freer one" logic.
+    win_lo = _parse_iso(start_iso)
+    win_hi = _parse_iso(end_iso)
+    if win_hi <= win_lo:
+        win_hi = win_lo + timedelta(hours=1)   # assume a ~1h meeting window
     try:
         token = _gcal_token(subject=cal)  # impersonate the exec to read free/busy
         if not token:
             return None  # not configured -> caller falls back to round-robin
         import requests
-        body = {"timeMin": start_iso, "timeMax": end_iso, "items": [{"id": cal}]}
+        body = {"timeMin": win_lo.isoformat(), "timeMax": win_hi.isoformat(),
+                "items": [{"id": cal}]}
         r = requests.post(f"{_CAL_API}/freeBusy", json=body,
                           headers={"Authorization": f"Bearer {token}"}, timeout=15)
         r.raise_for_status()
@@ -165,7 +173,6 @@ def freebusy(exec_name: str, start_iso: str, end_iso: str) -> Optional[int]:
         # DWD not authorized yet, network blip, scope issue, etc. — never crash the
         # bot over free/busy; fall back to round-robin selection.
         return None
-    win_lo, win_hi = _parse_iso(start_iso), _parse_iso(end_iso)
     total = 0
     for p in periods[:200]:                 # bounded loop (Power-of-Ten rule 2)
         lo = max(win_lo, _parse_iso(p["start"]))
@@ -478,8 +485,11 @@ def find_calendar_event(search_as: str, start_iso: str, terms):
             return (None, None)
         import requests
         lo = _parse_iso(start_iso)
-        win_lo = (lo.replace(microsecond=0)).isoformat()
-        win_hi = lo.replace(hour=min(lo.hour + 3, 23)).isoformat()
+        # Search a window from 30 min before to 3h after the stated start. Use
+        # timedelta (NOT .replace(hour=...), which collapses to zero width for
+        # late-day times like 23:00 UTC and never rolls over the date).
+        win_lo = (lo - timedelta(minutes=30)).isoformat()
+        win_hi = (lo + timedelta(hours=3)).isoformat()
         r = requests.get(
             f"{_CAL_API}/calendars/{search_as}/events",
             params={"timeMin": win_lo, "timeMax": win_hi, "singleEvents": "true",

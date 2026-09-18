@@ -1231,7 +1231,7 @@ def handle_message(event, client, say, logger):
     if not parsed_raw:
         return
     bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
-    bookings = [b for b in bookings if b and b.get('is_booking')]
+    bookings = [b for b in bookings if b and b.get('is_booking') and (b.get('contact_first_name') or b.get('contact_last_name') or b.get('contact_email') or b.get('company_name'))]  # require a person or company (drop chatter)
     if not bookings:
         return
 
@@ -1969,7 +1969,7 @@ def replay_missed_messages():
             if not parsed_raw:
                 continue
             bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
-            bookings = [b for b in bookings if b and b.get('is_booking')]
+            bookings = [b for b in bookings if b and b.get('is_booking') and (b.get('contact_first_name') or b.get('contact_last_name') or b.get('contact_email') or b.get('company_name'))]  # require a person or company (drop chatter)
             if not bookings:
                 continue
             owner_id = slack_user_to_owner(app.client, user_id)
@@ -2459,7 +2459,7 @@ def live_sweep_loop():
                     if not parsed_raw:
                         continue
                     bookings = parsed_raw if isinstance(parsed_raw, list) else [parsed_raw]
-                    bookings = [b for b in bookings if b and b.get('is_booking')]
+                    bookings = [b for b in bookings if b and b.get('is_booking') and (b.get('contact_first_name') or b.get('contact_last_name') or b.get('contact_email') or b.get('company_name'))]  # require a person or company (drop chatter)
                     if not bookings:
                         continue
                     owner_id = slack_user_to_owner(app.client, user_id)
