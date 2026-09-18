@@ -31,9 +31,16 @@ def render_blocks(rows, title, total, last=None):
         return blocks
 
     lines = []
-    for i, (name, count) in enumerate(rows[:25]):  # bounded render
-        noun = "meeting" if count == 1 else "meetings"
-        lines.append(f"{_rank_label(i)}  *{name}*: {count} {noun}")
+    leaders = [r for r in rows if r[1] > 0]
+    zeroes = [r for r in rows if r[1] == 0]
+    rank = 0
+    for name, count in (leaders + zeroes)[:25]:  # bounded render
+        if count > 0:
+            noun = "meeting" if count == 1 else "meetings"
+            lines.append(f"{_rank_label(rank)}  *{name}*: {count} {noun}")
+            rank += 1
+        else:
+            lines.append(f"—  {name}: 0 meetings")
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
     ctx = f"*{total}* meetings booked so far \U0001F525"
     if last and last.get("detail"):

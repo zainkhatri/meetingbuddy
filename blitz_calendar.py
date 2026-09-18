@@ -218,8 +218,10 @@ def _save_state(state):
 def refresh_board(client, rows):
     """Bump-to-bottom board: one message, reposted only when standings change."""
     assert isinstance(rows, list), "rows must be a list"
-    disp = sorted([(n, c) for n, c in rows if c > 0], key=lambda t: (-t[1], t[0].lower()))
-    total = sum(c for _, c in rows if c > 0)
+    # Show all AEs (including 0) so the full roster is visible from the start.
+    # Sort by count desc, then name asc; 0s sink to the bottom alphabetically.
+    disp = sorted(rows, key=lambda t: (-t[1], t[0].lower()))
+    total = sum(c for _, c in rows)
     blocks = render_blocks(disp, BLITZ_TITLE, total)
     text = render_text(disp, BLITZ_TITLE, total)
     # Signature covers the fully rendered board, so copy/title changes (not just
