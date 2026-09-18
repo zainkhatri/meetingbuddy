@@ -21,6 +21,7 @@ import datetime
 import json
 import os
 import random
+import re
 import threading
 import time
 
@@ -39,11 +40,13 @@ FREEMAIL = {
     "proton.me", "protonmail.com", "gmx.com",
 }
 
-BLITZ_CHANNEL_ID = os.environ.get("BLITZ_CHANNEL_ID")
-BLITZ_AES = [e.strip().lower() for e in os.environ.get("BLITZ_AES", "").split(",") if e.strip()]
-BLITZ_TITLE = os.environ.get("BLITZ_TITLE", "AE Blitz: Booked Meetings")
-BLITZ_POLL_SECS = int(os.environ.get("BLITZ_POLL_SECS", "300"))
-MAX_PAGES = 20  # bounded pagination
+BLITZ_CHANNEL_ID    = os.environ.get("BLITZ_CHANNEL_ID")
+BLITZ_AES           = [e.strip().lower() for e in os.environ.get("BLITZ_AES", "").split(",") if e.strip()]
+BLITZ_TITLE         = os.environ.get("BLITZ_TITLE", "AE Blitz: Booked Meetings")
+BLITZ_POLL_SECS     = int(os.environ.get("BLITZ_POLL_SECS", "300"))
+CONF_MEETINGS_CH    = os.environ.get("CONF_MEETINGS_CHANNEL", "C0B9Z8562RL")  # #conference-meetings
+MAX_PAGES           = 20  # bounded pagination
+_EMAIL_RE           = re.compile(r"[\w.+-]+@([\w-]+\.[\w.]+)")  # extract domains from text
 
 
 def _state_path():
@@ -110,10 +113,54 @@ def has_itc_title(ev):
     return "itc" in (ev.get("summary") or "").lower()
 
 
-def count_bookings(events, ae_email, start, end):
-    """Count unique ITC meetings ae_email booked in [start, end]. Pure + testable."""
+def fetch_bdr_domains(slack_token, start, end):
+    """Read #conference-meetings for the blitz window; return set of external domains
+    that BDRs posted bookings for. Any AE calendar event whose guests are all in
+    this set was booked by a BDR, not the AE.
+
+    Uses a simple email-regex scan — no Claude parse — so it only matches when
+    the BDR included the prospect's email in their post (which meetingbuddy needs
+    for HubSpot contact creation, so it's almost always present).
+    """
+    assert slack_token and start and end, "all args required"
+    bdr_domains = set()
+    try:
+        params = {"channel": CONF_MEETINGS_CH,
+                  "oldest": str(start.timestamp()),
+                  "latest": str(end.timestamp()),
+                  "limit": 200, "inclusive": "true"}
+        for _ in range(MAX_PAGES):  # bounded pagination
+            r = requests.get("https://slack.com/api/conversations.history",
+                             headers={"Authorization": f"Bearer {slack_token}"},
+                             params=params, timeout=20)
+            if not r.ok:
+                break
+            d = r.json()
+            for m in d.get("messages", []):
+                if m.get("bot_id") or m.get("subtype"):
+                    continue
+                text = m.get("text", "")
+                for dom in _EMAIL_RE.findall(text):
+                    dom = dom.lower()
+                    if dom != DOMAIN and dom not in FREEMAIL:
+                        bdr_domains.add(dom)
+            if not d.get("has_more"):
+                break
+            params["cursor"] = d.get("response_metadata", {}).get("next_cursor", "")
+    except Exception as e:
+        print(f"[blitz] conference-meetings fetch failed: {e}", flush=True)
+    return bdr_domains
+
+
+def count_bookings(events, ae_email, start, end, bdr_domains=None):
+    """Count unique ITC meetings ae_email booked in [start, end].
+
+    bdr_domains: set of company domains BDRs posted in #conference-meetings.
+    Any event where ALL external guests are in bdr_domains is skipped (BDR did it).
+    """
     assert isinstance(events, list), "events must be a list"
     assert start is not None and end is not None and start <= end, "valid window required"
+    bdr_domains = bdr_domains or set()
     seen = set()
     n = 0
     for ev in events:
@@ -126,9 +173,14 @@ def count_bookings(events, ae_email, start, end):
         created = parse_iso(ev.get("created"))
         if not created or created < start or created > end:
             continue
-        if not external_guests(ev):
+        guests = external_guests(ev)
+        if not guests:
             continue
         if not attribution(ev, ae_email):
+            continue
+        # Skip if every external guest domain was already posted in #conference-meetings
+        guest_domains = {g.rsplit("@", 1)[-1].lower() for g in guests}
+        if bdr_domains and guest_domains and guest_domains.issubset(bdr_domains):
             continue
         key = ev.get("recurringEventId") or ev.get("id")
         if not key or key in seen:
@@ -190,15 +242,19 @@ def list_events(token, updated_min_iso):
     return items
 
 
-def poll_once(sa_info, aes, start, end):
+def poll_once(sa_info, aes, start, end, slack_token=None):
     """Return {ae_email: count | None}. None = read failed this cycle."""
     assert isinstance(aes, list), "aes must be a list"
     out = {}
     umin = start.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    # Fetch BDR-booked domains from #conference-meetings once per cycle
+    bdr_domains = fetch_bdr_domains(slack_token, start, end) if slack_token else set()
+    if bdr_domains:
+        print(f"[blitz] {len(bdr_domains)} BDR-booked domain(s) excluded from AE credit", flush=True)
     for ae in aes:
         try:
             evs = list_events(_token(sa_info, ae), umin)
-            out[ae] = count_bookings(evs, ae, start, end)
+            out[ae] = count_bookings(evs, ae, start, end, bdr_domains)
         except Exception as e:
             print(f"[blitz] {ae} poll failed: {e}", flush=True)
             out[ae] = None
@@ -309,7 +365,7 @@ def run_poller(client):
           f"window {start.date()}..{end.date()}", flush=True)
     while True:  # bounded by process lifetime; each cycle isolated
         try:
-            counts = poll_once(sa_info, BLITZ_AES, start, end)
+            counts = poll_once(sa_info, BLITZ_AES, start, end, slack_token=client.token)
             rows = []
             for ae in BLITZ_AES:
                 c = counts.get(ae)

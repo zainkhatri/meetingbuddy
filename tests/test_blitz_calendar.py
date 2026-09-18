@@ -92,3 +92,21 @@ def test_itc_title_required():
     assert c([ev(summary="ITC // Acme + FurtherAI")]) == 1  # has ITC
     assert c([ev(summary="itc exec meeting @ Summit")]) == 1  # case-insensitive
     assert c([ev(summary="FurtherAI ITC Vegas exec")]) == 1   # ITC anywhere in title
+
+def test_bdr_domain_excluded():
+    # BDR posted acme.com in #conference-meetings — AE's ITC meeting with acme.com is skipped
+    bdr_doms = {"acme-insurance.com"}
+    e = ev(summary="ITC // Acme exec meeting")
+    assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 0
+
+def test_non_bdr_domain_counts():
+    # BDR posted acme.com but this meeting is with beta.com — AE gets credit
+    bdr_doms = {"acme-insurance.com"}
+    e = ev(summary="ITC // Beta Insurance", attendees=[{"email": "cfo@beta.com"}])
+    assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 1
+
+def test_mixed_domains_counts():
+    # Meeting has acme.com (BDR) + beta.com (AE own contact) — not all BDR, counts
+    bdr_doms = {"acme-insurance.com"}
+    e = ev(summary="ITC // Multi", attendees=[{"email": "cfo@acme-insurance.com"}, {"email": "vp@beta.com"}])
+    assert bc.count_bookings([e], AE, START, END, bdr_domains=bdr_doms) == 1
