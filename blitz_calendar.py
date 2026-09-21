@@ -384,6 +384,41 @@ def _save_state(state):
     os.replace(tmp, STATE_PATH)
 
 
+def _is_board_message(m, me):
+    """True if `m` is one of the bot's own leaderboard posts."""
+    assert isinstance(m, dict), "m must be a dict"
+    if not ((me and m.get("user") == me) or m.get("bot_id")):
+        return False
+    t = m.get("text", "") or ""
+    return ("booked as a team" in t) or (BLITZ_TITLE and BLITZ_TITLE in t)
+
+
+def delete_prior_boards(client):
+    """Delete EVERY existing bot leaderboard message in the channel.
+
+    Called on boot so a restart (deploy or Railway auto-restart) can never leave
+    a duplicate pinned board behind. Bounded to the recent history window.
+    """
+    try:
+        me = (client.auth_test() or {}).get("user_id")
+    except Exception:
+        me = None
+    try:
+        hist = client.conversations_history(channel=BLITZ_CHANNEL_ID, limit=50)
+    except Exception as e:
+        print(f"[blitz] history read for cleanup failed: {e}", flush=True)
+        return 0
+    n = 0
+    for m in hist.get("messages", []):  # bounded (<=50)
+        if _is_board_message(m, me):
+            try:
+                client.chat_delete(channel=BLITZ_CHANNEL_ID, ts=m["ts"])
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
 def refresh_board(client, rows):
     """Bump-to-bottom board: delete old, post fresh code-block leaderboard, pin it."""
     assert isinstance(rows, list), "rows must be a list"
@@ -464,17 +499,18 @@ def run_poller(client):
     last = {k: int(v) for k, v in (_load_state().get("counts") or {}).items()}
     print(f"[blitz] calendar poller: {len(BLITZ_AES)} AEs, every {BLITZ_POLL_SECS}s, "
           f"window {start.date()}..{end.date()}", flush=True)
-    # Force a fresh board on boot: clear any stale board pointer so we always
-    # post a visible board, even if the previous one was deleted out-of-band or
-    # the saved signature already matches (which would otherwise skip the post).
+    # Force a fresh board on boot: first delete EVERY existing board (so a
+    # restart never leaves duplicate pinned boards), then clear the saved
+    # pointer and post exactly one.
     try:
+        removed = delete_prior_boards(client)
         st = _load_state()
         st.pop("board_ts", None)
         st.pop("sig", None)
         _save_state(st)
         refresh_board(client, [(display_name(ae), last.get(ae, 0)) for ae in BLITZ_AES])
         posted = _load_state().get("board_ts")
-        print(f"[blitz] initial board posted (ts={posted})" if posted
+        print(f"[blitz] initial board posted (ts={posted}, cleaned {removed} old)" if posted
               else "[blitz] initial board NOT posted (post returned no ts)", flush=True)
     except Exception as e:
         print(f"[blitz] initial board post failed: {e}", flush=True)

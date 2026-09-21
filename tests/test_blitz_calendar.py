@@ -230,3 +230,43 @@ def test_process_counts_keeps_last_on_read_failure(monkeypatch):
     rows = bc.process_counts(c, {AE: None}, last)
     assert rows == [("Nia", 3)]  # keep last-known when the read failed
     assert c.hype == []
+
+
+# --- dedup: only one board survives a restart ------------------------------
+def test_is_board_message_matches_only_boards(monkeypatch):
+    monkeypatch.setattr(bc, "BLITZ_TITLE", "AE Blitz: Booked Meetings")
+    me = "UBOT"
+    board = {"user": me, "text": "*AE Blitz: Booked Meetings*\n```\n...\n🔥 0 booked as a team\n```"}
+    hype  = {"user": me, "text": "Nia is ON FIRE 🔥"}
+    other = {"user": "UHUMAN", "text": "🔥 0 booked as a team"}
+    assert bc._is_board_message(board, me) is True
+    assert bc._is_board_message(hype, me) is False   # hype isn't a board
+    assert bc._is_board_message(other, me) is False  # not the bot
+
+
+class _SweepClient:
+    def __init__(self, msgs):
+        self._msgs = msgs
+        self.deleted = []
+    def auth_test(self):
+        return {"user_id": "UBOT"}
+    def conversations_history(self, channel=None, limit=None):
+        return {"messages": self._msgs}
+    def chat_delete(self, channel=None, ts=None):
+        self.deleted.append(ts)
+        return {"ok": True}
+
+
+def test_delete_prior_boards_removes_all_boards(monkeypatch):
+    monkeypatch.setattr(bc, "BLITZ_TITLE", "AE Blitz: Booked Meetings")
+    monkeypatch.setattr(bc, "BLITZ_CHANNEL_ID", "C_TEST")
+    msgs = [
+        {"user": "UBOT", "ts": "1", "text": "*AE Blitz: Booked Meetings*\n🔥 0 booked as a team"},
+        {"user": "UBOT", "ts": "2", "text": "Nia is ON FIRE 🔥"},          # hype, keep
+        {"user": "UBOT", "ts": "3", "text": "*AE Blitz: Booked Meetings*\n🔥 1 booked as a team"},
+        {"user": "UHUMAN", "ts": "4", "text": "gm team"},                   # human, keep
+    ]
+    c = _SweepClient(msgs)
+    n = bc.delete_prior_boards(c)
+    assert n == 2
+    assert c.deleted == ["1", "3"]  # both boards gone, hype + human untouched
