@@ -257,6 +257,37 @@ def _token(sa_info, subject):
     return creds.token
 
 
+_RETRYABLE = (429, 500, 502, 503, 504)  # transient — worth another attempt
+
+
+def _get_events_page(token, params, attempts=3):
+    """Fetch one events page with bounded retries on timeout / transient 5xx.
+
+    The Railway container occasionally hits slow googleapis reads; a single
+    30s hang used to stall the whole poll cycle. Short timeout + a couple of
+    retries keeps a flaky calendar from blocking the board.
+    """
+    assert token, "token required"
+    assert attempts >= 1, "attempts must be >= 1"
+    last_err = None
+    for i in range(attempts):  # bounded
+        try:
+            r = requests.get(f"{CAL_API}/calendars/primary/events",
+                             headers={"Authorization": "Bearer " + token},
+                             params=params, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code in _RETRYABLE:
+                last_err = RuntimeError(f"events.list {r.status_code}")
+            else:
+                raise RuntimeError(f"events.list {r.status_code}: {r.text[:150]}")
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+        if i + 1 < attempts:
+            time.sleep(1 + i)  # bounded linear backoff (1s, 2s)
+    raise last_err or RuntimeError("events.list failed")
+
+
 def list_events(token, updated_min_iso):
     """Events created/modified since updated_min_iso (bounded pagination)."""
     assert token, "token required"
@@ -267,12 +298,7 @@ def list_events(token, updated_min_iso):
                   "showDeleted": "false", "maxResults": 250, "orderBy": "updated"}
         if page:
             params["pageToken"] = page
-        r = requests.get(f"{CAL_API}/calendars/primary/events",
-                         headers={"Authorization": "Bearer " + token},
-                         params=params, timeout=30)
-        if r.status_code != 200:
-            raise RuntimeError(f"events.list {r.status_code}: {r.text[:150]}")
-        d = r.json()
+        d = _get_events_page(token, params)
         items += d.get("items", [])
         page = d.get("nextPageToken")
         if not page:
@@ -388,6 +414,41 @@ def refresh_board(client, rows):
     _save_state(st)
 
 
+def process_counts(client, counts, last):
+    """Apply a fresh poll to `last` (mutated in place) and return board rows.
+
+    Fires a hype message for each genuinely new booking. `last` is seeded from
+    persisted state on boot, so a restart never re-fires hype for bookings that
+    were already celebrated. A None count (read failed this cycle) keeps the
+    AE's last-known number rather than dropping them to 0.
+    """
+    assert isinstance(counts, dict), "counts must be a dict"
+    assert isinstance(last, dict), "last must be a dict"
+    rows = []
+    for ae in BLITZ_AES:
+        c = counts.get(ae)
+        if c is None:
+            c = last.get(ae, 0)  # keep last-known on a read failure
+        else:
+            prev = last.get(ae, 0)
+            if c > prev:  # new booking detected — fire hype for each new one
+                name = display_name(ae)
+                for n in range(prev + 1, c + 1):  # bounded: at most MAX_BOOKINGS_PER_MSG
+                    _post_hype(client, name, n)
+            last[ae] = c
+        rows.append((display_name(ae), c))
+    return rows
+
+
+def _persist_counts(last):
+    """Save per-AE counts into the state file so hype survives a restart.
+    Loads first so board_ts/sig written by refresh_board are preserved."""
+    assert isinstance(last, dict), "last must be a dict"
+    st = _load_state()
+    st["counts"] = last
+    _save_state(st)
+
+
 def run_poller(client):
     """Daemon loop. Started from meeting_bot on boot when armed."""
     if not (BLITZ_CHANNEL_ID and BLITZ_AES):
@@ -398,25 +459,22 @@ def run_poller(client):
         print("[blitz] BLITZ_START/BLITZ_END not set or invalid — poller idle", flush=True)
         return
     sa_info = load_sa_info()
-    last = {}
+    # Restore counts from disk so a restart doesn't re-spam hype for meetings
+    # that were already celebrated.
+    last = {k: int(v) for k, v in (_load_state().get("counts") or {}).items()}
     print(f"[blitz] calendar poller: {len(BLITZ_AES)} AEs, every {BLITZ_POLL_SECS}s, "
           f"window {start.date()}..{end.date()}", flush=True)
+    # Post the board immediately so the channel always has one, even before the
+    # first (possibly slow) calendar poll completes.
+    try:
+        refresh_board(client, [(display_name(ae), last.get(ae, 0)) for ae in BLITZ_AES])
+    except Exception as e:
+        print(f"[blitz] initial board post failed: {e}", flush=True)
     while True:  # bounded by process lifetime; each cycle isolated
         try:
             counts = poll_once(sa_info, BLITZ_AES, start, end, slack_token=client.token)
-            rows = []
-            for ae in BLITZ_AES:
-                c = counts.get(ae)
-                if c is None:
-                    c = last.get(ae, 0)  # keep last-known on a read failure
-                else:
-                    prev = last.get(ae, 0)
-                    if c > prev:  # new booking detected — fire hype for each new one
-                        name = display_name(ae)
-                        for n in range(prev + 1, c + 1):  # bounded: at most MAX_BOOKINGS_PER_MSG
-                            _post_hype(client, name, n)
-                    last[ae] = c
-                rows.append((display_name(ae), c))
+            rows = process_counts(client, counts, last)
+            _persist_counts(last)  # before refresh_board, which preserves the key
             refresh_board(client, rows)
         except Exception as e:
             print(f"[blitz] poller cycle error: {e}", flush=True)

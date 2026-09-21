@@ -146,3 +146,87 @@ def test_has_bdr_attendee_helper():
     # No BDR on invite -> False
     assert not bc.has_bdr_attendee(
         {"organizer": org_ext, "attendees": [{"email": "cfo@acme.com"}]}, AE)
+
+
+# --- hardening: calendar read retry (#1) -----------------------------------
+class _FakeResp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code = status
+        self._p = payload or {}
+        self.text = text
+    def json(self):
+        return self._p
+
+
+def test_get_events_page_retries_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise bc.requests.Timeout("read timeout")
+        return _FakeResp(200, {"items": [1, 2]})
+    monkeypatch.setattr(bc.requests, "get", fake_get)
+    monkeypatch.setattr(bc.time, "sleep", lambda *_a, **_k: None)
+    d = bc._get_events_page("tok", {}, attempts=3)
+    assert d["items"] == [1, 2]
+    assert calls["n"] == 3  # retried twice, succeeded on third
+
+
+def test_get_events_page_gives_up_after_attempts(monkeypatch):
+    monkeypatch.setattr(bc.requests, "get",
+                        lambda *a, **k: (_ for _ in ()).throw(bc.requests.Timeout("x")))
+    monkeypatch.setattr(bc.time, "sleep", lambda *_a, **_k: None)
+    try:
+        bc._get_events_page("tok", {}, attempts=2)
+        assert False, "should have raised"
+    except bc.requests.Timeout:
+        pass
+
+
+def test_get_events_page_non_retryable_raises(monkeypatch):
+    monkeypatch.setattr(bc.requests, "get", lambda *a, **k: _FakeResp(404, text="nope"))
+    monkeypatch.setattr(bc.time, "sleep", lambda *_a, **_k: None)
+    try:
+        bc._get_events_page("tok", {}, attempts=3)
+        assert False, "should have raised"
+    except RuntimeError as e:
+        assert "404" in str(e)
+
+
+# --- hardening: hype persistence across restart (#2) ------------------------
+class _FakeClient:
+    token = "xoxb-test"
+    def __init__(self):
+        self.hype = []
+    def chat_postMessage(self, channel=None, text=None, **k):
+        self.hype.append(text)
+        return {"ts": "1.0"}
+
+
+def test_process_counts_fires_hype_on_increase(monkeypatch):
+    monkeypatch.setattr(bc, "BLITZ_AES", [AE])
+    c = _FakeClient()
+    last = {}
+    rows = bc.process_counts(c, {AE: 2}, last)
+    assert rows == [("Nia", 2)]
+    assert last[AE] == 2
+    assert len(c.hype) == 2  # first + second booking each get a shout
+
+
+def test_process_counts_no_refire_from_persisted_last(monkeypatch):
+    # simulates a restart: `last` restored from disk == current counts -> silence
+    monkeypatch.setattr(bc, "BLITZ_AES", [AE])
+    c = _FakeClient()
+    last = {AE: 2}
+    rows = bc.process_counts(c, {AE: 2}, last)
+    assert rows == [("Nia", 2)]
+    assert c.hype == []  # no re-spam on restart
+
+
+def test_process_counts_keeps_last_on_read_failure(monkeypatch):
+    monkeypatch.setattr(bc, "BLITZ_AES", [AE])
+    c = _FakeClient()
+    last = {AE: 3}
+    rows = bc.process_counts(c, {AE: None}, last)
+    assert rows == [("Nia", 3)]  # keep last-known when the read failed
+    assert c.hype == []
