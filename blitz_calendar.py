@@ -120,20 +120,26 @@ def has_itc_title(ev):
 
 
 def has_bdr_attendee(ev, ae_email):
-    """Return True if a known BDR is on the invite AND the AE is not the organizer.
+    """Return True only when a FurtherAI BDR is the one who set the meeting up.
 
-    If the AE organized the meeting and invited a BDR for support, that's the AE's
-    work — don't exclude it. But if the AE is just an attendee and a BDR is also
-    there, the BDR booked it.
+    Cases:
+      - AE organized it -> the AE's work, BDR is just support -> not excluded.
+      - An EXTERNAL prospect organized it -> the AE's meeting; a BDR merely cc'd
+        on the invite does NOT make it BDR-booked -> not excluded.
+      - A FurtherAI teammate organized it AND a BDR is on the invite -> BDR-sourced
+        -> excluded.
 
     This is the primary BDR exclusion signal — it's instantaneous (no timing race).
     """
     assert isinstance(ev, dict), "ev must be a dict"
     assert isinstance(ae_email, str) and ae_email, "ae_email required"
     o = ev.get("organizer") or {}
-    ae_is_organizer = o.get("self") or (o.get("email") or "").lower() == ae_email.lower()
+    oem = (o.get("email") or "").lower()
+    ae_is_organizer = o.get("self") or oem == ae_email.lower()
     if ae_is_organizer:
         return False  # AE organized it — BDR is just support
+    if oem and not oem.endswith("@" + DOMAIN):
+        return False  # prospect-organized — the AE's meeting, not BDR-booked
     for a in (ev.get("attendees") or []):
         if (a.get("email") or "").lower() in BDR_EMAILS:
             return True
