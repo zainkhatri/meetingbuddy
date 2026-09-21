@@ -464,10 +464,18 @@ def run_poller(client):
     last = {k: int(v) for k, v in (_load_state().get("counts") or {}).items()}
     print(f"[blitz] calendar poller: {len(BLITZ_AES)} AEs, every {BLITZ_POLL_SECS}s, "
           f"window {start.date()}..{end.date()}", flush=True)
-    # Post the board immediately so the channel always has one, even before the
-    # first (possibly slow) calendar poll completes.
+    # Force a fresh board on boot: clear any stale board pointer so we always
+    # post a visible board, even if the previous one was deleted out-of-band or
+    # the saved signature already matches (which would otherwise skip the post).
     try:
+        st = _load_state()
+        st.pop("board_ts", None)
+        st.pop("sig", None)
+        _save_state(st)
         refresh_board(client, [(display_name(ae), last.get(ae, 0)) for ae in BLITZ_AES])
+        posted = _load_state().get("board_ts")
+        print(f"[blitz] initial board posted (ts={posted})" if posted
+              else "[blitz] initial board NOT posted (post returned no ts)", flush=True)
     except Exception as e:
         print(f"[blitz] initial board post failed: {e}", flush=True)
     while True:  # bounded by process lifetime; each cycle isolated
