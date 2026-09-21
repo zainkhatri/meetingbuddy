@@ -120,9 +120,17 @@ def test_mixed_contacts_counts():
 # --- BDR attendee tests ---
 _BDR = "jacob@furtherai.com"
 
-def test_bdr_attendee_ae_not_organizer_excluded():
-    # BDR is on invite, exec is organizer, AE is attendee -> BDR booked it -> skip
+def test_prospect_organized_with_bdr_cc_counts():
+    # PROSPECT (external) organized + BDR merely cc'd -> the AE's meeting -> counts.
+    # (Policy: a prospect-sent invite is AE-earned even if a BDR is on the thread.)
     org = {"self": False, "email": "cfo@acme.com"}
+    e = ev(summary="ITC // Acme", organizer=org,
+           attendees=[{"email": "cfo@acme.com"}, {"email": _BDR}])
+    assert bc.count_bookings([e], AE, START, END) == 1
+
+def test_furtherai_bdr_organizer_excluded():
+    # A FurtherAI BDR is the organizer -> BDR-sourced -> excluded.
+    org = {"self": False, "email": _BDR}
     e = ev(summary="ITC // Acme", organizer=org,
            attendees=[{"email": "cfo@acme.com"}, {"email": _BDR}])
     assert bc.count_bookings([e], AE, START, END) == 0
@@ -137,9 +145,13 @@ def test_bdr_attendee_ae_is_organizer_counts():
 def test_has_bdr_attendee_helper():
     org_ae = {"self": True, "email": AE}
     org_ext = {"self": False, "email": "cfo@acme.com"}
-    # BDR on invite, external organizer
-    assert bc.has_bdr_attendee(
+    org_bdr = {"self": False, "email": _BDR}
+    # External (prospect) organizer + BDR cc'd -> NOT bdr-booked (the AE's meeting)
+    assert not bc.has_bdr_attendee(
         {"organizer": org_ext, "attendees": [{"email": _BDR}, {"email": "cfo@acme.com"}]}, AE)
+    # FurtherAI BDR is the organizer -> bdr-booked
+    assert bc.has_bdr_attendee(
+        {"organizer": org_bdr, "attendees": [{"email": _BDR}, {"email": "cfo@acme.com"}]}, AE)
     # BDR on invite, AE is organizer -> False (AE's meeting)
     assert not bc.has_bdr_attendee(
         {"organizer": org_ae, "attendees": [{"email": _BDR}, {"email": "cfo@acme.com"}]}, AE)
@@ -270,3 +282,28 @@ def test_delete_prior_boards_removes_all_boards(monkeypatch):
     n = bc.delete_prior_boards(c)
     assert n == 2
     assert c.deleted == ["1", "3"]  # both boards gone, hype + human untouched
+
+
+# --- tie handling: tied counts share a medal -------------------------------
+from leaderboard import render_text, _rank_index  # noqa: E402
+
+def test_rank_index_ties_share_rank():
+    assert _rank_index(1, [1, 1]) == 0        # tied at top -> both rank 0 (gold)
+    assert _rank_index(3, [3, 1, 1]) == 0
+    assert _rank_index(1, [3, 1, 1]) == 1     # tied for 2nd -> both silver
+    assert _rank_index(1, [2, 2, 1]) == 2     # two golds above -> bronze
+
+def test_render_text_tied_leaders_both_gold():
+    txt = render_text([("Nia", 1), ("Nick Margay", 1)], "AE Blitz", 2)
+    gold = "\U0001F947"; silver = "\U0001F948"
+    rows = [l for l in txt.splitlines() if ("Nia" in l or "Nick Margay" in l)]
+    assert len(rows) == 2
+    assert all(gold in l for l in rows)       # both gold
+    assert silver not in txt                  # no silver when tied at top
+
+def test_render_text_gold_then_bronze_when_two_tied_first():
+    # [2,2,1] -> two golds, then bronze (silver skipped, standard competition ranking)
+    txt = render_text([("A", 2), ("B", 2), ("C", 1)], "AE Blitz", 5)
+    gold = "\U0001F947"; bronze = "\U0001F949"
+    assert txt.count(gold) == 2
+    assert bronze in txt

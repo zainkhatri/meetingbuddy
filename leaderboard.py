@@ -12,6 +12,15 @@ def _rank_label(i):
     return _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
 
 
+def _rank_index(count, counts):
+    """Standard competition rank (0-based): how many entries strictly outrank
+    `count`. Tied counts share a rank — two leaders tied at the top are both
+    rank 0 (both gold), so ties get the same medal."""
+    assert isinstance(count, int) and count >= 0, "count must be a non-negative int"
+    assert isinstance(counts, (list, tuple)), "counts must be a sequence"
+    return sum(1 for c in counts if c > count)
+
+
 def _bar(count, max_count):
     """Green-square progress bar scaled to max_count."""
     assert count >= 0 and max_count >= 0, "counts must be non-negative"
@@ -31,13 +40,12 @@ def render_canvas_markdown(rows, title, total):
     leaders = [r for r in rows if r[1] > 0]
     zeroes  = [r for r in rows if r[1] == 0]
     name_w  = max(len(n) for n, _ in rows) + 1
+    leader_counts = [c for _, c in leaders]
     lines   = [f"# {title}\n"]
-    rank = 0
     for name, count in leaders[:25]:
-        medal = _rank_label(rank)
+        medal = _rank_label(_rank_index(count, leader_counts))  # ties share a medal
         bar   = _bar(count, max_count)
         lines.append(f"{medal} **{name:{name_w}}** {bar}  {count}")
-        rank += 1
     if zeroes:
         lines.append("\n---\n")
         for name, _ in zeroes[:25]:
@@ -65,14 +73,13 @@ def render_blocks(rows, title, total, last=None):
     max_count = max((c for _, c in rows), default=0)
     leaders = [r for r in rows if r[1] > 0]
     zeroes  = [r for r in rows if r[1] == 0]
+    leader_counts = [c for _, c in leaders]
     lines = []
-    rank  = 0
     for name, count in (leaders + zeroes)[:25]:
         bar  = _bar(count, max_count or 1)
         noun = "meeting" if count == 1 else "meetings"
         if count > 0:
-            lines.append(f"{_rank_label(rank)}  *{name}*  {bar}  {count} {noun}")
-            rank += 1
+            lines.append(f"{_rank_label(_rank_index(count, leader_counts))}  *{name}*  {bar}  {count} {noun}")  # ties share a medal
         else:
             lines.append(f"      {name}  {bar}  0")
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
@@ -91,13 +98,12 @@ def render_text(rows, title, total, last=None):
     leaders = [r for r in rows if r[1] > 0]
     zeroes  = [r for r in rows if r[1] == 0]
     name_w  = max(len(n) for n, _ in rows) + 1
+    leader_counts = [c for _, c in leaders]
     lines   = []
-    rank    = 0
     for name, count in leaders[:25]:
-        label = _rank_label(rank)
+        label = _rank_label(_rank_index(count, leader_counts))  # ties share a medal
         bar   = _bar(count, max_count)
         lines.append(f"{label} {name:{name_w}} {bar}  {count}")
-        rank += 1
     if zeroes:
         sep = "─" * (name_w + 16)
         lines.append(sep)
