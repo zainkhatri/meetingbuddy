@@ -1286,6 +1286,7 @@ def handle_claim_account(ack, body, client, action):
                 msg_txt = ("That account has an open or closed-won deal — it's excluded from recycling."
                            if covered else "Couldn't verify deal status — try again.")
                 client.chat_postEphemeral(channel=ch, user=uid, text=msg_txt); return
+            payload['recycle_state'] = recycle.WARM      # claimed -> back to warm under new owner
             pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                                 json={'properties': payload}, timeout=30)
             if not pr or not pr.ok:
@@ -1392,6 +1393,107 @@ def recycle_dry_run_once():
         recycle_dry_run()
     except Exception as e:
         print(f'[recycle-dryrun] error: {e}', flush=True)
+
+
+# --- Account recycling: the LIVE warn (Thu) + release (Mon) pipeline ---
+# Actions only fire when RECYCLE_ENABLED=1; otherwise each run LOGS what it would
+# do (a scheduled dry-run) and touches nothing. Self-serve claim model: release
+# posts the pool digest with Claim buttons; ownership only changes when a BDR clicks.
+
+def _hs_set_recycle_state(cid, state):
+    """Patch a company's recycle_state. Returns True on success."""
+    r = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}',
+                        headers=HS, json={'properties': {'recycle_state': state}}, timeout=30)
+    return bool(r is not None and r.ok)
+
+
+def _recycle_next_monday(now):
+    """(deadline_str, days_left) for the coming Monday release."""
+    days_ahead = (0 - now.weekday()) % 7 or 7           # Mon=0; never 'today'
+    monday = now + timedelta(days=days_ahead)
+    return monday.strftime('%a %b %d').replace(' 0', ' '), days_ahead
+
+
+def run_recycle(phase, live):
+    """Execute one recycle phase ('warn' or 'release') over all BDR-owned companies.
+    live=False logs intentions only. Deal-covered candidates are excluded (and
+    pulled out of any warned/pool state). Returns a counts dict."""
+    now = datetime.now(timezone.utc)
+    tag = 'live' if live else 'dry'
+    counts = {'warn': 0, 'release': 0, 'reset': 0, 'excluded_deal': 0}
+    pool = []
+    for c in _fetch_bdr_owned_companies():
+        cid = str(c.get('id'))
+        p = c.get('properties', {})
+        name = p.get('name') or cid
+        sdr = (p.get('sdr_owner') or '').strip()
+        d = recycle.decide(p, now, phase)
+        act = d['action']
+        if act in ('warn', 'release') and hs_company_has_covered_deal(cid) is not False:
+            counts['excluded_deal'] += 1
+            if (p.get('recycle_state') or '').strip() and live:
+                _hs_set_recycle_state(cid, recycle.WARM)   # covered now — pull it out
+            continue
+        if act == 'warn':
+            counts['warn'] += 1
+            deadline, days_left = _recycle_next_monday(now)
+            print(f'[recycle][{tag}] WARN {name} ({sdr}) — {d["reason"]}', flush=True)
+            if live:
+                uid = SDR_SLACK_REV.get(sdr)
+                if uid:
+                    try:
+                        app.client.chat_postMessage(channel=uid,
+                            text=recycle.warn_dm_text(name, deadline, days_left))
+                    except Exception as e:
+                        print(f'[recycle] DM {sdr} failed: {e}', flush=True)
+                _hs_set_recycle_state(cid, recycle.WARNED)   # set warned even if DM missed
+        elif act == 'release':
+            counts['release'] += 1
+            pool.append({'id': cid, 'name': name,
+                         'note': f'cold {recycle.days_since_activity(p, now)}d'})
+            print(f'[recycle][{tag}] RELEASE {name} ({sdr}) — {d["reason"]}', flush=True)
+            if live:
+                _hs_set_recycle_state(cid, recycle.POOL)
+        elif act == 'reset':
+            counts['reset'] += 1
+            if live:
+                _hs_set_recycle_state(cid, recycle.WARM)
+    if phase == 'release' and pool:
+        blocks = recycle.pool_digest_blocks(pool)
+        print(f'[recycle][{tag}] POST digest — {len(pool)} accounts to {recycle.RECYCLE_CHANNEL}', flush=True)
+        if live:
+            try:
+                app.client.chat_postMessage(channel=recycle.RECYCLE_CHANNEL,
+                    blocks=blocks, text='Up for grabs this week')
+            except Exception as e:
+                print(f'[recycle] digest post failed: {e}', flush=True)
+    print(f'[recycle][{tag}] {phase} done: {counts}', flush=True)
+    return counts
+
+
+def recycle_loop():
+    """Fire the warn scan on Thursdays and the release+post on Mondays, at most
+    once per phase per ISO week. Marker files survive the 30-min os._exit(0)
+    restarts (same pattern as sheet_reconcile_loop) so each boot is a no-op until
+    the day/week rolls over."""
+    time.sleep(90)
+    base = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            phase = {3: 'warn', 0: 'release'}.get(now.weekday())   # Mon=0 .. Thu=3
+            if phase:
+                marker = os.path.join(base, f'.recycle_{phase}_{now.strftime("%G-W%V")}')
+                if os.path.exists(marker):
+                    pass
+                else:
+                    live = os.environ.get('RECYCLE_ENABLED') == '1'
+                    run_recycle(phase, live)
+                    with open(marker, 'w') as f:
+                        f.write(now.isoformat())
+        except Exception as e:
+            print(f'[recycle] loop error: {e}', flush=True)
+        time.sleep(3600)
 
 
 @app.event('message')
@@ -2955,4 +3057,7 @@ if __name__ == '__main__':
     threading.Thread(target=recycle_dry_run_once, daemon=True).start()
     if os.environ.get('RECYCLE_DRY_RUN') == '1':
         print('[recycle-dryrun] READ-ONLY preview scheduled (no DMs, no writes)')
+    threading.Thread(target=recycle_loop, daemon=True).start()
+    print('[recycle] warn(Thu)/release(Mon) loop started — '
+          + ('LIVE' if os.environ.get('RECYCLE_ENABLED') == '1' else 'dry-run (RECYCLE_ENABLED!=1)'))
     handler.start()
