@@ -1422,7 +1422,7 @@ def run_recycle(phase, live):
     pulled out of any warned/pool state). Returns a counts dict."""
     now = datetime.now(timezone.utc)
     tag = 'live' if live else 'dry'
-    counts = {'warn': 0, 'release': 0, 'reset': 0, 'excluded_deal': 0}
+    counts = {'warn': 0, 'warn_no_dm': 0, 'release': 0, 'reset': 0, 'excluded_deal': 0}
     pool = []
     for c in _fetch_bdr_owned_companies():
         cid = str(c.get('id'))
@@ -1437,40 +1437,69 @@ def run_recycle(phase, live):
                 _hs_set_recycle_status(cid, recycle.WARM)   # covered now — pull it out
             continue
         if act == 'warn':
-            counts['warn'] += 1
             deadline, days_left = _recycle_next_monday(now)
             print(f'[recycle][{tag}] WARN {name} ({sdr}) — {d["reason"]}', flush=True)
-            if live:
+            if not live:
+                counts['warn'] += 1
+            else:
+                # Only advance to 'warned' if the DM actually reached the owner —
+                # otherwise Monday would release the account with NO warning ever
+                # sent. An unmapped/failed owner stays warm and is retried next week.
                 uid = SDR_SLACK_REV.get(sdr)
+                sent = False
                 if uid:
                     try:
                         app.client.chat_postMessage(channel=uid,
                             text=recycle.warn_dm_text(name, deadline, days_left))
+                        sent = True
                     except Exception as e:
                         print(f'[recycle] DM {sdr} failed: {e}', flush=True)
-                _hs_set_recycle_status(cid, recycle.WARNED)   # set warned even if DM missed
+                if sent:
+                    _hs_set_recycle_status(cid, recycle.WARNED)
+                    counts['warn'] += 1
+                else:
+                    counts['warn_no_dm'] += 1
+                    print(f'[recycle] no DM for {sdr!r} (unmapped/failed) — left warm, will retry', flush=True)
         elif act == 'release':
             counts['release'] += 1
             pool.append({'id': cid, 'name': name,
                          'note': f'cold {recycle.days_since_activity(p, now)}d'})
             print(f'[recycle][{tag}] RELEASE {name} ({sdr}) — {d["reason"]}', flush=True)
-            if live:
-                _hs_set_recycle_status(cid, recycle.POOL)
+            # NB: recycle_status is set to 'pool' only AFTER the digest posts (below),
+            # so a failed post never orphans an account as 'pool' with no Claim button.
         elif act == 'reset':
             counts['reset'] += 1
             if live:
                 _hs_set_recycle_status(cid, recycle.WARM)
     if phase == 'release' and pool:
-        blocks = recycle.pool_digest_blocks(pool)
         print(f'[recycle][{tag}] POST digest — {len(pool)} accounts to {recycle.RECYCLE_CHANNEL}', flush=True)
         if live:
-            try:
-                app.client.chat_postMessage(channel=recycle.RECYCLE_CHANNEL,
-                    blocks=blocks, text='Up for grabs this week')
-            except Exception as e:
-                print(f'[recycle] digest post failed: {e}', flush=True)
+            posted = _post_pool_digest(pool)
+            if posted < len(pool):
+                print(f'[recycle] {len(pool) - posted} account(s) not posted — left warned, '
+                      'will retry next cycle', flush=True)
     print(f'[recycle][{tag}] {phase} done: {counts}', flush=True)
     return counts
+
+
+def _post_pool_digest(pool, chunk=45):
+    """Post the up-for-grabs digest in chunks under Slack's 50-block-per-message
+    limit (header + one row per account). An account is patched to 'pool' only
+    after ITS chunk posts, so a failed/oversized post never leaves it marked
+    'pool' with no Claim button. Returns the count actually posted."""
+    posted = 0
+    for i in range(0, len(pool), chunk):
+        part = pool[i:i + chunk]
+        try:
+            app.client.chat_postMessage(channel=recycle.RECYCLE_CHANNEL,
+                blocks=recycle.pool_digest_blocks(part), text='Up for grabs this week')
+        except Exception as e:
+            print(f'[recycle] digest chunk post failed: {e}', flush=True)
+            continue
+        for a in part:
+            _hs_set_recycle_status(a['id'], recycle.POOL)
+        posted += len(part)
+    return posted
 
 
 def recycle_loop():
@@ -1486,13 +1515,16 @@ def recycle_loop():
             phase = {3: 'warn', 0: 'release'}.get(now.weekday())   # Mon=0 .. Thu=3
             if phase:
                 marker = os.path.join(base, f'.recycle_{phase}_{now.strftime("%G-W%V")}')
-                if os.path.exists(marker):
-                    pass
-                else:
-                    live = os.environ.get('RECYCLE_ENABLED') == '1'
-                    run_recycle(phase, live)
+                if not os.path.exists(marker):
+                    # Claim the week BEFORE running: periodic_restart() os._exit(0)s
+                    # every ~30 min, so writing the marker after a partial run would
+                    # let a mid-run kill re-fire the whole phase (double DMs/digest).
+                    # The state machine is idempotent (warned/pool -> noop), so a rare
+                    # crash just leaves a few accounts for next week's run.
                     with open(marker, 'w') as f:
                         f.write(now.isoformat())
+                    live = os.environ.get('RECYCLE_ENABLED') == '1'
+                    run_recycle(phase, live)
         except Exception as e:
             print(f'[recycle] loop error: {e}', flush=True)
         time.sleep(3600)
