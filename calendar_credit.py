@@ -20,6 +20,12 @@ from typing import Callable, Optional
 AE_IDS = frozenset({'163071452', '96605305', '162894707', '84250910', '165453251',
                     '166089614', '165453250', '654909503', '164601691'})
 
+# BDR owner ids (Matt, Dani, Jacob, Zain, Ben) — also mirrored from that cron. A
+# demo deal may be auto-credited only when it is Unassigned/ownerless OR still owned
+# by the booking BDR; a deal claimed by ANY other human (a non-AE manager/ops/founder)
+# is never overwritten — only its AE, if any, is trusted. Keep in sync.
+BDR_IDS = frozenset({'92184259', '82377567', '162210484', '88760040', '164943105'})
+
 
 def decide_action(incumbent_ae: Optional[str], ae_on_invite):
     """Pure decision. Returns ('assign', ae_id) | ('nudge', reason) | ('noop', None).
@@ -249,7 +255,11 @@ def credit_after_booking(*, meeting_id, deal_id, deal_owner_id, incumbent_ae,
     # action == 'assign'
     result['action'] = 'assign'
     result['assigned_to'] = payload
-    can_write = (deal_owner_id == UNASSIGNED) or (deal_owner_id not in AE_IDS)
+    # Only credit an Unassigned/ownerless deal or one still owned by the booking
+    # BDR. NEVER overwrite a human who deliberately claimed it (a non-AE manager/
+    # ops/founder is not in AE_IDS but must be left alone) — that would silently
+    # move a commission-bearing deal off its rightful owner.
+    can_write = (deal_owner_id in ('', UNASSIGNED)) or (deal_owner_id in BDR_IDS)
     if assign_enabled and can_write and callable(assign_fn):
         assign_fn(deal_id=deal_id, owner_id=payload)
         log_owner_change(deal_id, deal_owner_id, payload, 'assign', 'booking')

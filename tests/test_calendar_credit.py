@@ -183,6 +183,36 @@ def test_credit_incumbent_conflict_names_incumbent():
         incumbent_ae='163071452', resolve_fn=lambda **k: {'165453250'}, **BASE)
     assert out['action'] == 'nudge' and 'Gavin' in out['text']
 
+def test_credit_never_overwrites_human_non_ae_owner():
+    # A deal claimed by a human who is neither an AE nor a BDR (e.g. a manager,
+    # owner id 99496285) must NOT be reassigned even with auto-assign on.
+    calls = []
+    base = {**BASE, 'deal_owner_id': '99496285'}
+    out = cc.credit_after_booking(
+        incumbent_ae=None, resolve_fn=lambda **k: {'163071452'},
+        assign_enabled=True, assign_fn=lambda **k: calls.append(k), **base)
+    assert out['action'] == 'assign' and out['assigned_to'] == '163071452'
+    assert calls == []                    # writer NOT called — human owner protected
+
+def test_credit_writes_when_unassigned_and_enabled():
+    calls = []
+    out = cc.credit_after_booking(
+        incumbent_ae=None, resolve_fn=lambda **k: {'163071452'},
+        assign_enabled=True, assign_fn=lambda **k: calls.append(k), **BASE)
+    assert calls == [{'deal_id': 'd1', 'owner_id': '163071452'}]
+
+def test_credit_writes_when_bdr_owned_and_enabled():
+    calls = []
+    base = {**BASE, 'deal_owner_id': '92184259'}  # Matt (BDR)
+    cc.credit_after_booking(
+        incumbent_ae=None, resolve_fn=lambda **k: {'163071452'},
+        assign_enabled=True, assign_fn=lambda **k: calls.append(k), **base)
+    assert calls == [{'deal_id': 'd1', 'owner_id': '163071452'}]
+
+def test_bdr_and_ae_rosters_are_disjoint():
+    assert cc.BDR_IDS.isdisjoint(cc.AE_IDS)
+    assert cc.UNASSIGNED not in cc.AE_IDS and cc.UNASSIGNED not in cc.BDR_IDS
+
 
 def test_run_retry_once_removes_resolved_items():
     cc._RETRY[:] = []

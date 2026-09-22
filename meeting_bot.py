@@ -51,6 +51,10 @@ HS_API_KEY = os.environ['HS_API_KEY']
 HS = {'Authorization': f'Bearer {HS_API_KEY}', 'Content-Type': 'application/json'}
 
 CREDIT_BY_CALENDAR = os.environ.get('CREDIT_BY_CALENDAR', '0') == '1'
+# Second gate: with CREDIT_BY_CALENDAR on but this OFF, the credit path resolves,
+# nudges, and audits but performs NO owner writes — the nudge-only observation
+# window. Only flip this on once nudges have been verified against real bookings.
+CREDIT_ASSIGN_ENABLED = os.environ.get('CREDIT_ASSIGN_ENABLED', '0') == '1'
 _AE_EMAIL_MAP = None  # lazily built once per process
 
 # Demos are higher-intent than conference touches, so #demos-booked bookings DO
@@ -856,7 +860,7 @@ def _run_calendar_credit(company_id, contact_id, prospect_email, booker_owner_id
             incumbent_ae=incumbent, booker_email=booker_email,
             prospect_email=prospect_email, external_url=external_url, start_iso=start_iso,
             ae_email_map=_ae_email_map(), owner_name_fn=_owner_name,
-            assign_enabled=True, assign_fn=_hs_set_deal_owner)
+            assign_enabled=CREDIT_ASSIGN_ENABLED, assign_fn=_hs_set_deal_owner)
         if out.get('action') == 'assign' and out.get('assigned_to'):
             say(text=f"✓ Credited this deal to *{_owner_name(out['assigned_to']) or out['assigned_to']}* "
                      f"(on the calendar invite).", thread_ts=ts)
@@ -2803,7 +2807,7 @@ if __name__ == '__main__':
                 booker_email=ctx['booker_email'], prospect_email=ctx.get('prospect_email'),
                 external_url=ctx.get('external_url'), start_iso=ctx.get('start_iso'),
                 ae_email_map=_ae_email_map(), owner_name_fn=_owner_name,
-                assign_enabled=True, assign_fn=_hs_set_deal_owner)
+                assign_enabled=CREDIT_ASSIGN_ENABLED, assign_fn=_hs_set_deal_owner)
 
         def _credit_retry_loop():
             while True:
