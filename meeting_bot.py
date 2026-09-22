@@ -1322,7 +1322,7 @@ def _fetch_bdr_owned_companies():
             {'propertyName': 'sdr_owner', 'operator': 'IN',
              'values': sorted(set(SDR_SLACK.values()))},
         ]}],
-        'properties': ['name', 'sdr_owner', 'recycle_status', 'hs_last_activity_date'],
+        'properties': ['name', 'sdr_owner', 'recycle_status', 'hs_last_activity_date', 'createdate'],
         'limit': 100,
     }
     results, after = [], None
@@ -1370,9 +1370,9 @@ def recycle_dry_run():
             would_pool_preview += 1
     print('[recycle-dryrun] ===== READ-ONLY preview (no DMs, no writes) =====', flush=True)
     print(f'[recycle-dryrun] BDR-owned companies: {total}', flush=True)
-    print(f'[recycle-dryrun] MISSING hs_last_activity_date: {missing_activity}'
+    print(f'[recycle-dryrun] NO usable date (neither last-activity nor createdate): {missing_activity}'
           f' ({0 if not total else round(100*missing_activity/total)}%) '
-          '<- if high, the cold signal is unusable', flush=True)
+          '<- these age-invisible accounts never recycle; should be near 0', flush=True)
     print(f'[recycle-dryrun] would WARN this cycle: {sum(would_warn.values())} '
           f'-> {would_warn}', flush=True)
     print(f'[recycle-dryrun] ≥{recycle.RELEASE_DAYS}d cold (pool volume preview): '

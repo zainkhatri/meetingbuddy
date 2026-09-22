@@ -29,6 +29,24 @@ def test_missing_activity_is_none_and_not_cold():
     assert r.is_cold({}, NOW, 30) is False           # never act on missing data
     assert r.is_cold({'hs_last_activity_date': ''}, NOW, 30) is False
 
+def test_falls_back_to_createdate_when_no_activity():
+    # never-worked account (blank activity date) ages by createdate instead
+    p = {'hs_last_activity_date': '', 'createdate': '2026-08-01T00:00:00Z'}
+    assert r.days_since_activity(p, NOW) == 51
+    assert r.is_cold(p, NOW, 30) is True
+
+def test_activity_date_wins_over_createdate():
+    # a worked account uses last-activity, not the older createdate
+    p = {'hs_last_activity_date': '2026-09-20T00:00:00Z', 'createdate': '2026-01-01T00:00:00Z'}
+    assert r.days_since_activity(p, NOW) == 1
+    assert r.is_cold(p, NOW, 30) is False
+
+def test_fresh_import_not_cold_yet():
+    # bulk-imported a day ago, no activity -> ages by createdate -> not cold yet
+    p = {'createdate': '2026-09-20T00:00:00Z'}      # NOW is 2026-09-21 12:00
+    assert r.days_since_activity(p, NOW) == 1
+    assert r.is_cold(p, NOW, 27) is False
+
 def test_is_cold_boundary():
     assert r.is_cold(_props(days_old=30), NOW, 30) is True
     assert r.is_cold(_props(days_old=29), NOW, 30) is False

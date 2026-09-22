@@ -33,22 +33,31 @@ POOL = 'pool'
 ACTIVE = 'active'       # set by the claim flow; clock-eligible like WARM
 
 
-def days_since_activity(props, now):
-    """Age in whole days of HubSpot 'Last Activity Date'. Accepts an epoch-millis
-    string (what the search API returns) or an ISO-8601 string. Returns None when
-    the field is missing/blank/unparseable — the caller treats None as 'cannot
-    confirm cold' and never warns or releases on it (fail-safe)."""
-    raw = (props.get('hs_last_activity_date') or '').strip()
+def _parse_hs_date(raw):
+    """Parse a HubSpot date value into an aware UTC datetime. Accepts an epoch-millis
+    string (what the search API returns) or an ISO-8601 string. None if
+    missing/blank/unparseable."""
+    raw = (raw or '').strip()
     if not raw:
         return None
     try:
         if raw.isdigit():
-            when = datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
-        else:
-            when = datetime.fromisoformat(raw.replace('Z', '+00:00'))
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
+            return datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
+        when = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
     except (ValueError, OverflowError, OSError):
+        return None
+
+
+def days_since_activity(props, now):
+    """Age in whole days since the account was last touched. Prefers HubSpot
+    'Last Activity Date'; when that's blank — a never-worked account, which is
+    common on fresh imports — falls back to 'createdate', so an account that has
+    simply sat untouched since it entered the CRM still ages toward recycling.
+    Returns None only when BOTH are missing/unparseable, and the caller treats
+    None as 'cannot confirm cold' and never warns or releases on it (fail-safe)."""
+    when = _parse_hs_date(props.get('hs_last_activity_date')) or _parse_hs_date(props.get('createdate'))
+    if when is None:
         return None
     return (now - when).days
 
