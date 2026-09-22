@@ -713,6 +713,37 @@ def hs_find_open_deal(company_id, contact_id):
     return None
 
 
+# Recycling guard: a company with a deal in any of these stages is actively
+# worked/owned and must never be recycled (Gavin, 2026-09-21) — the open pipeline
+# stages plus closed-won. Enforced at claim time as a safety net behind the
+# digest's own eligibility filter.
+DEAL_COVERED_STAGES = DEAL_OPEN_STAGES + ['closedwon']
+
+
+def hs_company_has_covered_deal(company_id):
+    """True if the company has any deal in an open or closed-won stage. Such an
+    account is excluded from recycling. Returns None on API error so the caller
+    can distinguish 'no covered deal' (False) from 'couldn't check' (None) and
+    avoid handing out a covered account on a transient CRM hiccup."""
+    if not company_id:
+        return False
+    body = {'filterGroups': [{'filters': [
+                {'propertyName': 'associations.company', 'operator': 'EQ', 'value': str(company_id)},
+                {'propertyName': 'pipeline', 'operator': 'EQ', 'value': DEAL_PIPELINE},
+                {'propertyName': 'dealstage', 'operator': 'IN', 'values': DEAL_COVERED_STAGES},
+            ]}],
+            'properties': ['dealstage'], 'limit': 1}
+    try:
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
+                          headers=HS, json=body, timeout=30)
+        if not r.ok:
+            return None
+        return bool(r.json().get('total', 0))
+    except Exception as e:
+        print(f'[claim] deal-cover check failed for {company_id}: {e}', flush=True)
+        return None
+
+
 def hs_create_scheduled_deal(company_name, company_id,
                              contact_id, bdr_owner_id, meeting_id):
     """Create a Scheduled-stage deal for a demo booking and associate
@@ -1245,6 +1276,15 @@ def handle_claim_account(ack, body, client, action):
                 true_owner = (props.get('last_claim_by') or props.get('sdr_owner') or sdr).strip() or sdr
                 _update(mark_claimed(orig, cid, true_owner))
                 client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
+            # Exclude accounts with an open or closed-won deal — they're actively
+            # worked and not up for grabs (Gavin, 2026-09-21). Safety net behind the
+            # digest filter; on a CRM hiccup (None) we don't hand out the account.
+            covered = hs_company_has_covered_deal(cid)
+            if covered or covered is None:
+                _update(orig)                                # restore button — account not claimed
+                msg_txt = ("That account has an open or closed-won deal — it's excluded from recycling."
+                           if covered else "Couldn't verify deal status — try again.")
+                client.chat_postEphemeral(channel=ch, user=uid, text=msg_txt); return
             pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                                 json={'properties': payload}, timeout=30)
             if not pr or not pr.ok:
