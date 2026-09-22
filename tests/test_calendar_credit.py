@@ -171,6 +171,7 @@ def test_credit_one_ae_nudge_only_does_not_assign():
         assign_enabled=False, assign_fn=lambda **k: calls.append(k), **BASE)
     assert out['action'] == 'assign' and out['assigned_to'] == '163071452'
     assert out['text'] is None            # nudge-only phase posts nothing on assign
+    assert out['wrote'] is False          # no real write happened
     assert calls == []                    # writer NOT called while disabled
 
 def test_credit_multi_ae_posts_nudge():
@@ -192,6 +193,7 @@ def test_credit_never_overwrites_human_non_ae_owner():
         incumbent_ae=None, resolve_fn=lambda **k: {'163071452'},
         assign_enabled=True, assign_fn=lambda **k: calls.append(k), **base)
     assert out['action'] == 'assign' and out['assigned_to'] == '163071452'
+    assert out['wrote'] is False          # human owner protected -> no write
     assert calls == []                    # writer NOT called — human owner protected
 
 def test_credit_writes_when_unassigned_and_enabled():
@@ -200,6 +202,7 @@ def test_credit_writes_when_unassigned_and_enabled():
         incumbent_ae=None, resolve_fn=lambda **k: {'163071452'},
         assign_enabled=True, assign_fn=lambda **k: calls.append(k), **BASE)
     assert calls == [{'deal_id': 'd1', 'owner_id': '163071452'}]
+    assert out['wrote'] is True
 
 def test_credit_writes_when_bdr_owned_and_enabled():
     calls = []

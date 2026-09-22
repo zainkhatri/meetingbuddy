@@ -862,8 +862,12 @@ def _run_calendar_credit(company_id, contact_id, prospect_email, booker_owner_id
             ae_email_map=_ae_email_map(), owner_name_fn=_owner_name,
             assign_enabled=CREDIT_ASSIGN_ENABLED, assign_fn=_hs_set_deal_owner)
         if out.get('action') == 'assign' and out.get('assigned_to'):
-            say(text=f"✓ Credited this deal to *{_owner_name(out['assigned_to']) or out['assigned_to']}* "
-                     f"(on the calendar invite).", thread_ts=ts)
+            who = _owner_name(out['assigned_to']) or out['assigned_to']
+            if out.get('wrote'):
+                say(text=f"✓ Credited this deal to *{who}* (on the calendar invite).", thread_ts=ts)
+            else:
+                say(text=f"👀 Would credit this deal to *{who}* (on the calendar invite) — "
+                         f"observation mode, owner left unchanged.", thread_ts=ts)
         elif out.get('text'):
             say(text=out['text'], thread_ts=ts)
     except Exception as e:
