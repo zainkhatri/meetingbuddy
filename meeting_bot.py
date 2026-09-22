@@ -40,6 +40,7 @@ import sheet_sync
 import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
+import calendar_credit
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -48,6 +49,13 @@ SLACK_APP_TOKEN = os.environ['SLACK_APP_TOKEN']
 ANTHROPIC_API_KEY = os.environ['ANTHROPIC_API_KEY']
 HS_API_KEY = os.environ['HS_API_KEY']
 HS = {'Authorization': f'Bearer {HS_API_KEY}', 'Content-Type': 'application/json'}
+
+CREDIT_BY_CALENDAR = os.environ.get('CREDIT_BY_CALENDAR', '0') == '1'
+# Second gate: with CREDIT_BY_CALENDAR on but this OFF, the credit path resolves,
+# nudges, and audits but performs NO owner writes — the nudge-only observation
+# window. Only flip this on once nudges have been verified against real bookings.
+CREDIT_ASSIGN_ENABLED = os.environ.get('CREDIT_ASSIGN_ENABLED', '0') == '1'
+_AE_EMAIL_MAP = None  # lazily built once per process
 
 # Demos are higher-intent than conference touches, so #demos-booked bookings DO
 # auto-create a Scheduled-stage deal (Zain, 2026-08-13). Separate switch so it's
@@ -444,7 +452,7 @@ def hs_find_meeting_by_company_date(company_name, date_str):
             {'propertyName': 'hs_meeting_title', 'operator': 'CONTAINS_TOKEN', 'value': company_name},
             {'propertyName': 'hs_meeting_start_time', 'operator': 'BETWEEN', 'value': str(lo_ms), 'highValue': str(hi_ms)},
         ]}],
-        'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'meeting_sourced_by', 'hs_meeting_outcome', 'hubspot_owner_id'],
+        'properties': ['hs_meeting_title', 'hs_meeting_start_time', 'meeting_sourced_by', 'hs_meeting_outcome', 'hubspot_owner_id', 'hs_meeting_external_url'],
         'limit': 20,
     }
     r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search', headers=HS, json=body, timeout=30)
@@ -458,7 +466,9 @@ def hs_find_meeting_by_company_date(company_name, date_str):
             continue
         return {'id': m['id'], 'sourced_by': p.get('meeting_sourced_by', ''),
                 'title': p.get('hs_meeting_title', ''),
-                'owner_id': p.get('hubspot_owner_id', '')}
+                'owner_id': p.get('hubspot_owner_id', ''),
+                'external_url': p.get('hs_meeting_external_url') or None,
+                'start_iso': p.get('hs_meeting_start_time') or None}
     return None
 
 
@@ -483,7 +493,7 @@ def hs_find_existing_meeting(contact_id, date_str):
     for a in r.json().get('results', []):
         mid = str(a['toObjectId'])
         rg = requests.get(f'https://api.hubapi.com/crm/v3/objects/meetings/{mid}', headers=HS,
-                          params={'properties': 'hs_meeting_start_time,meeting_sourced_by,hs_meeting_outcome,hs_meeting_title,hubspot_owner_id'},
+                          params={'properties': 'hs_meeting_start_time,meeting_sourced_by,hs_meeting_outcome,hs_meeting_title,hubspot_owner_id,hs_meeting_external_url'},
                           timeout=10)
         if rg.status_code != 200:
             continue
@@ -500,12 +510,13 @@ def hs_find_existing_meeting(contact_id, date_str):
         except Exception:
             continue
         diff = abs((start_dt - target).total_seconds()) if target else 1e12
-        candidates.append((diff, mid, p.get('meeting_sourced_by', ''), p.get('hubspot_owner_id', '')))
+        candidates.append((diff, mid, p.get('meeting_sourced_by', ''), p.get('hubspot_owner_id', ''),
+                           p.get('hs_meeting_external_url') or None, start))
 
     if not candidates:
         return None
     candidates.sort()  # closest match first
-    diff, mid, sourced_by, existing_owner = candidates[0]
+    diff, mid, sourced_by, existing_owner, existing_ext_url, existing_start = candidates[0]
     # If we have a target, only accept matches within ±5 days
     if target and diff > 5 * 86400:
         return None
@@ -513,7 +524,8 @@ def hs_find_existing_meeting(contact_id, date_str):
     rg = requests.get(f'https://api.hubapi.com/crm/v3/objects/meetings/{mid}', headers=HS,
                       params={'properties': 'hs_meeting_title'}, timeout=10)
     title = (rg.json().get('properties') or {}).get('hs_meeting_title', '') if rg.status_code == 200 else ''
-    return {'id': mid, 'sourced_by': sourced_by, 'title': title, 'owner_id': existing_owner}
+    return {'id': mid, 'sourced_by': sourced_by, 'title': title, 'owner_id': existing_owner,
+            'external_url': existing_ext_url, 'start_iso': existing_start}
 
 
 def hs_update_meeting(meeting_id, sourced_by, mtype=None, channel=None, conf=None):
@@ -691,7 +703,7 @@ def hs_find_open_deal(company_id, contact_id):
                     {'propertyName': 'pipeline', 'operator': 'EQ', 'value': DEAL_PIPELINE},
                     {'propertyName': 'dealstage', 'operator': 'IN', 'values': DEAL_OPEN_STAGES},
                 ]}],
-                'properties': ['dealname', 'dealstage'], 'limit': 1}
+                'properties': ['dealname', 'dealstage', 'hubspot_owner_id'], 'limit': 1}
         r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
                           headers=HS, json=body, timeout=30)
         if r.status_code == 200:
@@ -782,6 +794,80 @@ def _owner_name(owner_id):
     except Exception:
         pass
     return None
+
+
+def _ae_email_map():
+    global _AE_EMAIL_MAP
+    if _AE_EMAIL_MAP is None:
+        try:
+            _AE_EMAIL_MAP = calendar_credit.build_ae_email_map(api_key=HS_API_KEY)
+        except Exception as e:
+            print(f'[credit] owner map build failed: {e}', flush=True)
+            _AE_EMAIL_MAP = {}
+    return _AE_EMAIL_MAP
+
+
+def _hs_set_deal_owner(*, deal_id, owner_id):
+    """Write hubspot_owner_id on a deal. Used by the booking-path auto-assign.
+    Raises on a non-2xx response so a failed write is never audited as success."""
+    assert deal_id, 'deal_id required'
+    assert owner_id, 'owner_id required'
+    r = requests.patch(f'https://api.hubapi.com/crm/v3/objects/deals/{deal_id}',
+                       headers=HS, json={'properties': {'hubspot_owner_id': owner_id}}, timeout=15)
+    r.raise_for_status()
+
+
+_OWNER_EMAIL_CACHE = {}
+
+
+def _owner_email(owner_id):
+    """Email for a HubSpot owner id (for calendar impersonation). None on failure."""
+    if not owner_id:
+        return None
+    if owner_id in _OWNER_EMAIL_CACHE:
+        return _OWNER_EMAIL_CACHE[owner_id]
+    try:
+        r = requests.get(f'https://api.hubapi.com/crm/v3/owners/{owner_id}', headers=HS, timeout=15)
+        if r.status_code == 200:
+            em = (r.json().get('email') or '').strip().lower() or None
+            _OWNER_EMAIL_CACHE[owner_id] = em
+            return em
+    except Exception:
+        pass
+    return None
+
+
+def _run_calendar_credit(company_id, contact_id, prospect_email, booker_owner_id,
+                         meeting_id, external_url, start_iso, say, ts):
+    """Booking-path credit step. No-op unless CREDIT_BY_CALENDAR. Auto-assigns the
+    deal to the AE on the invite when unambiguous; posts a nudge on ambiguity."""
+    if not CREDIT_BY_CALENDAR:
+        return
+    try:
+        open_deal = hs_find_open_deal(company_id, contact_id)
+        if not open_deal:
+            return
+        deal_id = open_deal['id']
+        # incumbent = the deal's current owner if it is an AE
+        cur = open_deal.get('properties', {}).get('hubspot_owner_id') or ''
+        incumbent = cur if cur in calendar_credit.AE_IDS else None
+        booker_email = _owner_email(booker_owner_id)
+        if not booker_email:
+            print(f'[credit] no email for booker owner {booker_owner_id}; skipping credit for mtg {meeting_id}', flush=True)
+            return
+        out = calendar_credit.credit_after_booking(
+            meeting_id=meeting_id, deal_id=deal_id, deal_owner_id=cur,
+            incumbent_ae=incumbent, booker_email=booker_email,
+            prospect_email=prospect_email, external_url=external_url, start_iso=start_iso,
+            ae_email_map=_ae_email_map(), owner_name_fn=_owner_name,
+            assign_enabled=CREDIT_ASSIGN_ENABLED, assign_fn=_hs_set_deal_owner)
+        if out.get('action') == 'assign' and out.get('assigned_to'):
+            say(text=f"✓ Credited this deal to *{_owner_name(out['assigned_to']) or out['assigned_to']}* "
+                     f"(on the calendar invite).", thread_ts=ts)
+        elif out.get('text'):
+            say(text=out['text'], thread_ts=ts)
+    except Exception as e:
+        print(f'[credit] booking-path failed for mtg {meeting_id}: {e}', flush=True)
 
 
 def _hs_search_total(obj, company_id, props):
@@ -1684,6 +1770,9 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         # Conference booking -> make sure a Scheduled-stage deal exists
         deal_suffix = ensure_deal(channel, conf, company_name, company_id,
                                   contact_id, owner_id, existing['id'])
+        _run_calendar_credit(company_id, contact_id, email, owner_id,
+                             existing['id'], existing.get('external_url'),
+                             existing.get('start_iso'), say, ts)
         portal_id = '44712408'
         mtg_url = f"https://app-na2.hubspot.com/contacts/{portal_id}/record/0-47/{existing['id']}"
         prev = existing['sourced_by']
@@ -1765,6 +1854,10 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         deal_suffix = ensure_deal(channel, parsed.get('conference_source'),
                                   company_name, company_id,
                                   contact_id, owner_id, mtg['id'])
+        _run_calendar_credit(company_id, contact_id, email, owner_id,
+                             mtg['id'], None,
+                             parsed.get('meeting_time_utc') and f"{parsed.get('meeting_date')}T{parsed.get('meeting_time_utc')}:00Z",
+                             say, ts)
 
     # 6. Push to Ellen's sheet (best-effort)
     sheet_result = ''
@@ -2706,4 +2799,23 @@ if __name__ == '__main__':
     if blitz_calendar.BLITZ_CHANNEL_ID and blitz_calendar.BLITZ_AES:
         threading.Thread(target=blitz_calendar.run_poller, args=(app.client,), daemon=True).start()
         print(f'[blitz] calendar poller started ({len(blitz_calendar.BLITZ_AES)} AEs)')
+    if CREDIT_BY_CALENDAR:
+        def _credit_retry_ctx(ctx):                   # deal_id is already carried in ctx
+            return calendar_credit.credit_after_booking(
+                meeting_id=ctx['meeting_id'], deal_id=ctx['deal_id'],
+                deal_owner_id=ctx.get('deal_owner_id', ''), incumbent_ae=ctx.get('incumbent_ae'),
+                booker_email=ctx['booker_email'], prospect_email=ctx.get('prospect_email'),
+                external_url=ctx.get('external_url'), start_iso=ctx.get('start_iso'),
+                ae_email_map=_ae_email_map(), owner_name_fn=_owner_name,
+                assign_enabled=CREDIT_ASSIGN_ENABLED, assign_fn=_hs_set_deal_owner)
+
+        def _credit_retry_loop():
+            while True:
+                time.sleep(120)                       # every 2 min, within RETRY_TTL
+                try:
+                    calendar_credit.run_retry_once(credit_fn=_credit_retry_ctx)
+                except Exception as e:
+                    print(f'[credit-retry] loop error: {e}', flush=True)
+
+        threading.Thread(target=_credit_retry_loop, daemon=True).start()
     handler.start()
