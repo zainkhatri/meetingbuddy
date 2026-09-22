@@ -228,7 +228,7 @@ def credit_after_booking(*, meeting_id, deal_id, deal_owner_id, incumbent_ae,
     assert booker_email and '@' in booker_email, 'valid booker_email required'
     assert callable(owner_name_fn), 'owner_name_fn must be callable'
     resolve_fn = resolve_fn or resolve_ae_from_calendar
-    result = {'action': 'noop', 'text': None, 'assigned_to': None}
+    result = {'action': 'noop', 'text': None, 'assigned_to': None, 'wrote': False}
     try:
         ae_on_invite = resolve_fn(
             booker_email=booker_email, prospect_email=prospect_email,
@@ -263,4 +263,5 @@ def credit_after_booking(*, meeting_id, deal_id, deal_owner_id, incumbent_ae,
     if assign_enabled and can_write and callable(assign_fn):
         assign_fn(deal_id=deal_id, owner_id=payload)
         log_owner_change(deal_id, deal_owner_id, payload, 'assign', 'booking')
+        result['wrote'] = True                      # a real owner write happened
     return result
