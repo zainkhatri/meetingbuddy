@@ -4,11 +4,17 @@ machine + digest-block building. No slack/network/env at import — every functi
 takes already-fetched HubSpot props and an explicit `now`, so the whole clock is
 unit-testable and deterministic.
 
-Lifecycle (per BDR-owned company; state lives in the `recycle_state` property):
+Lifecycle (per BDR-owned company; the single `recycle_status` HubSpot property):
 
-    warm ──(≥WARN_DAYS cold, Thu)──▶ warned ──(≥RELEASE_DAYS, Mon)──▶ pool ──▶ (claimed)
-      ▲                                 │                              │
-      └──── fresh activity clears it ───┴──────────────────────────────┘
+    warm ──(≥WARN_DAYS cold, Thu)──▶ warned ──(≥RELEASE_DAYS, Mon)──▶ pool ──(claimed)──▶ active
+      ▲                                 │                              │                    │
+      └──── fresh activity clears it ───┴──────────────────────────────┘                    │
+      └──────────────────────────── (goes cold again) ───────────────────────────────────┘
+
+`active` is set by the claim flow (claim_logic) when a BDR claims a pooled account.
+A claimed account is treated like `warm` for the clock — if it later goes cold it can
+warn/recycle again. This is the SAME property the claim button already reads/writes, so
+there is one source of truth, not two.
 
 The bot layer handles the network (HubSpot search/patch, Slack DM/post) and the
 deal-exclusion lookup; this module only decides what should happen.
@@ -20,10 +26,11 @@ RELEASE_DAYS = 30       # eligible for the pool at this age
 RECYCLE_CHANNEL = 'C096CHCQWJ0'   # all 5 BDRs are members
 CLAIM_ACTION = 'claim_account'    # matches claim_logic's row shape
 
-# recycle_state values
+# recycle_status values (shared with claim_logic — do not fork into a 2nd property)
 WARM = ''
 WARNED = 'warned'
 POOL = 'pool'
+ACTIVE = 'active'       # set by the claim flow; clock-eligible like WARM
 
 
 def days_since_activity(props, now):
@@ -69,7 +76,7 @@ def decide(props, now, phase, has_covered_deal=False,
       'noop'   — do nothing
     'new_state' is None for 'noop'."""
     assert phase in ('warn', 'release'), f'bad phase: {phase!r}'
-    state = (props.get('recycle_state') or WARM).strip()
+    state = (props.get('recycle_status') or WARM).strip()
 
     # A covered deal (open/closed-won) overrides everything: never in the program.
     if has_covered_deal:
@@ -85,7 +92,8 @@ def decide(props, now, phase, has_covered_deal=False,
                 'reason': f'fresh activity ({d}d ago) — owner re-engaged'}
 
     if phase == 'warn':
-        if state == WARM and is_cold(props, now, warn_days):
+        # WARM and ACTIVE (freshly claimed) both start the clock when they go cold.
+        if state in (WARM, ACTIVE) and is_cold(props, now, warn_days):
             return {'action': 'warn', 'new_state': WARNED,
                     'reason': f'cold {days_since_activity(props, now)}d — warning owner'}
         return {'action': 'noop', 'new_state': None, 'reason': f'no warn (state={state or "warm"})'}

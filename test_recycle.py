@@ -8,7 +8,7 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
 
 def _props(days_old=None, state=r.WARM, owner='Ben'):
-    p = {'recycle_state': state, 'sdr_owner': owner}
+    p = {'recycle_status': state, 'sdr_owner': owner}
     if days_old is not None:
         when = NOW - timedelta(days=days_old)
         p['hs_last_activity_date'] = str(int(when.timestamp() * 1000))   # epoch-ms like the search API
@@ -47,6 +47,11 @@ def test_warn_noop_when_too_fresh():
 def test_warn_noop_when_already_warned():
     d = r.decide(_props(days_old=28, state=r.WARNED), NOW, 'warn')
     assert d['action'] == 'noop'                     # don't re-warn
+
+def test_claimed_active_account_re_enters_clock_when_cold():
+    # an 'active' (recently claimed) account that later goes cold warns again
+    d = r.decide(_props(days_old=45, state=r.ACTIVE), NOW, 'warn')
+    assert d['action'] == 'warn' and d['new_state'] == r.WARNED
 
 
 # --- state machine: release phase ---

@@ -1286,7 +1286,8 @@ def handle_claim_account(ack, body, client, action):
                 msg_txt = ("That account has an open or closed-won deal — it's excluded from recycling."
                            if covered else "Couldn't verify deal status — try again.")
                 client.chat_postEphemeral(channel=ch, user=uid, text=msg_txt); return
-            payload['recycle_state'] = recycle.WARM      # claimed -> back to warm under new owner
+            # claim_decision already sets recycle_status='active' in the payload — that IS
+            # the post-claim lifecycle state (clock-eligible like warm), so no extra clear.
             pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                                 json={'properties': payload}, timeout=30)
             if not pr or not pr.ok:
@@ -1321,7 +1322,7 @@ def _fetch_bdr_owned_companies():
             {'propertyName': 'sdr_owner', 'operator': 'IN',
              'values': sorted(set(SDR_SLACK.values()))},
         ]}],
-        'properties': ['name', 'sdr_owner', 'recycle_state', 'hs_last_activity_date'],
+        'properties': ['name', 'sdr_owner', 'recycle_status', 'hs_last_activity_date'],
         'limit': 100,
     }
     results, after = [], None
@@ -1354,7 +1355,7 @@ def recycle_dry_run():
     for c in companies:
         p = c.get('properties', {})
         sdr = (p.get('sdr_owner') or '').strip()
-        state = (p.get('recycle_state') or '').strip()
+        state = (p.get('recycle_status') or '').strip()
         if state in already:
             already[state] += 1
         if recycle.days_since_activity(p, now) is None:
@@ -1400,10 +1401,11 @@ def recycle_dry_run_once():
 # do (a scheduled dry-run) and touches nothing. Self-serve claim model: release
 # posts the pool digest with Claim buttons; ownership only changes when a BDR clicks.
 
-def _hs_set_recycle_state(cid, state):
-    """Patch a company's recycle_state. Returns True on success."""
+def _hs_set_recycle_status(cid, state):
+    """Patch a company's recycle_status (the single lifecycle property, shared with
+    the claim flow). Returns True on success."""
     r = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}',
-                        headers=HS, json={'properties': {'recycle_state': state}}, timeout=30)
+                        headers=HS, json={'properties': {'recycle_status': state}}, timeout=30)
     return bool(r is not None and r.ok)
 
 
@@ -1431,8 +1433,8 @@ def run_recycle(phase, live):
         act = d['action']
         if act in ('warn', 'release') and hs_company_has_covered_deal(cid) is not False:
             counts['excluded_deal'] += 1
-            if (p.get('recycle_state') or '').strip() and live:
-                _hs_set_recycle_state(cid, recycle.WARM)   # covered now — pull it out
+            if (p.get('recycle_status') or '').strip() in (recycle.WARNED, recycle.POOL) and live:
+                _hs_set_recycle_status(cid, recycle.WARM)   # covered now — pull it out
             continue
         if act == 'warn':
             counts['warn'] += 1
@@ -1446,18 +1448,18 @@ def run_recycle(phase, live):
                             text=recycle.warn_dm_text(name, deadline, days_left))
                     except Exception as e:
                         print(f'[recycle] DM {sdr} failed: {e}', flush=True)
-                _hs_set_recycle_state(cid, recycle.WARNED)   # set warned even if DM missed
+                _hs_set_recycle_status(cid, recycle.WARNED)   # set warned even if DM missed
         elif act == 'release':
             counts['release'] += 1
             pool.append({'id': cid, 'name': name,
                          'note': f'cold {recycle.days_since_activity(p, now)}d'})
             print(f'[recycle][{tag}] RELEASE {name} ({sdr}) — {d["reason"]}', flush=True)
             if live:
-                _hs_set_recycle_state(cid, recycle.POOL)
+                _hs_set_recycle_status(cid, recycle.POOL)
         elif act == 'reset':
             counts['reset'] += 1
             if live:
-                _hs_set_recycle_state(cid, recycle.WARM)
+                _hs_set_recycle_status(cid, recycle.WARM)
     if phase == 'release' and pool:
         blocks = recycle.pool_digest_blocks(pool)
         print(f'[recycle][{tag}] POST digest — {len(pool)} accounts to {recycle.RECYCLE_CHANNEL}', flush=True)
