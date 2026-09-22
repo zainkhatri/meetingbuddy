@@ -41,6 +41,7 @@ import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
+import recycle
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -713,6 +714,37 @@ def hs_find_open_deal(company_id, contact_id):
     return None
 
 
+# Recycling guard: a company with a deal in any of these stages is actively
+# worked/owned and must never be recycled (Gavin, 2026-09-21) — the open pipeline
+# stages plus closed-won. Enforced at claim time as a safety net behind the
+# digest's own eligibility filter.
+DEAL_COVERED_STAGES = DEAL_OPEN_STAGES + ['closedwon']
+
+
+def hs_company_has_covered_deal(company_id):
+    """True if the company has any deal in an open or closed-won stage. Such an
+    account is excluded from recycling. Returns None on API error so the caller
+    can distinguish 'no covered deal' (False) from 'couldn't check' (None) and
+    avoid handing out a covered account on a transient CRM hiccup."""
+    if not company_id:
+        return False
+    body = {'filterGroups': [{'filters': [
+                {'propertyName': 'associations.company', 'operator': 'EQ', 'value': str(company_id)},
+                {'propertyName': 'pipeline', 'operator': 'EQ', 'value': DEAL_PIPELINE},
+                {'propertyName': 'dealstage', 'operator': 'IN', 'values': DEAL_COVERED_STAGES},
+            ]}],
+            'properties': ['dealstage'], 'limit': 1}
+    try:
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
+                          headers=HS, json=body, timeout=30)
+        if not r.ok:
+            return None
+        return bool(r.json().get('total', 0))
+    except Exception as e:
+        print(f'[claim] deal-cover check failed for {company_id}: {e}', flush=True)
+        return None
+
+
 def hs_create_scheduled_deal(company_name, company_id,
                              contact_id, bdr_owner_id, meeting_id):
     """Create a Scheduled-stage deal for a demo booking and associate
@@ -1245,6 +1277,17 @@ def handle_claim_account(ack, body, client, action):
                 true_owner = (props.get('last_claim_by') or props.get('sdr_owner') or sdr).strip() or sdr
                 _update(mark_claimed(orig, cid, true_owner))
                 client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
+            # Exclude accounts with an open or closed-won deal — they're actively
+            # worked and not up for grabs (Gavin, 2026-09-21). Safety net behind the
+            # digest filter; on a CRM hiccup (None) we don't hand out the account.
+            covered = hs_company_has_covered_deal(cid)
+            if covered or covered is None:
+                _update(orig)                                # restore button — account not claimed
+                msg_txt = ("That account has an open or closed-won deal — it's excluded from recycling."
+                           if covered else "Couldn't verify deal status — try again.")
+                client.chat_postEphemeral(channel=ch, user=uid, text=msg_txt); return
+            # claim_decision already sets recycle_status='active' in the payload — that IS
+            # the post-claim lifecycle state (clock-eligible like warm), so no extra clear.
             pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
                                 json={'properties': payload}, timeout=30)
             if not pr or not pr.ok:
@@ -1262,6 +1305,229 @@ def handle_claim_account(ack, body, client, action):
                 text=f"{sdr} claimed *{name}* from you — it was 30+ days cold.")
         except Exception as e:
             print(f'[claim] old-owner DM failed: {e}', flush=True)
+
+
+# --- Account recycling: READ-ONLY dry-run probe ---
+# Computes what the warn/release pipeline WOULD do and only logs it. Sends no
+# DMs, writes nothing to HubSpot, posts to no channel. Gated behind RECYCLE_DRY_RUN=1
+# so it never runs by accident. Its whole job is to hand real numbers to leadership
+# (how many accounts would be pooled, and — critically — whether HubSpot's
+# hs_last_activity_date is actually populated) before we arm anything live.
+
+def _fetch_bdr_owned_companies():
+    """All companies owned by one of the 5 BDRs, paginated (bounded at 1000).
+    Read-only. Returns raw HubSpot result dicts (props under 'properties')."""
+    body = {
+        'filterGroups': [{'filters': [
+            {'propertyName': 'sdr_owner', 'operator': 'IN',
+             'values': sorted(set(SDR_SLACK.values()))},
+        ]}],
+        'properties': ['name', 'sdr_owner', 'recycle_status', 'hs_last_activity_date'],
+        'limit': 100,
+    }
+    results, after = [], None
+    for _ in range(10):                                  # bounded pagination
+        if after:
+            body['after'] = after
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/companies/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code != 200:
+            print(f'[recycle-dryrun] company search failed: {r.status_code} {r.text[:200]}', flush=True)
+            break
+        data = r.json()
+        results += data.get('results', [])
+        after = ((data.get('paging') or {}).get('next') or {}).get('after')
+        if not after:
+            break
+    return results
+
+
+def recycle_dry_run():
+    """Log-only preview of the recycling pipeline. No side effects."""
+    now = datetime.now(timezone.utc)
+    companies = _fetch_bdr_owned_companies()
+    total = len(companies)
+    missing_activity = 0
+    would_warn = {}                                      # sdr -> count
+    would_pool_preview = 0                               # ≥RELEASE_DAYS regardless of warn state
+    already = {'warned': 0, 'pool': 0}
+    samples = []
+    for c in companies:
+        p = c.get('properties', {})
+        sdr = (p.get('sdr_owner') or '').strip()
+        state = (p.get('recycle_status') or '').strip()
+        if state in already:
+            already[state] += 1
+        if recycle.days_since_activity(p, now) is None:
+            missing_activity += 1
+            continue
+        if recycle.decide(p, now, 'warn')['action'] == 'warn':
+            would_warn[sdr] = would_warn.get(sdr, 0) + 1
+            if len(samples) < 10:
+                samples.append(f"{p.get('name') or c.get('id')} ({sdr}, "
+                               f"{recycle.days_since_activity(p, now)}d)")
+        if recycle.is_cold(p, now, recycle.RELEASE_DAYS):
+            would_pool_preview += 1
+    print('[recycle-dryrun] ===== READ-ONLY preview (no DMs, no writes) =====', flush=True)
+    print(f'[recycle-dryrun] BDR-owned companies: {total}', flush=True)
+    print(f'[recycle-dryrun] MISSING hs_last_activity_date: {missing_activity}'
+          f' ({0 if not total else round(100*missing_activity/total)}%) '
+          '<- if high, the cold signal is unusable', flush=True)
+    print(f'[recycle-dryrun] would WARN this cycle: {sum(would_warn.values())} '
+          f'-> {would_warn}', flush=True)
+    print(f'[recycle-dryrun] ≥{recycle.RELEASE_DAYS}d cold (pool volume preview): '
+          f'{would_pool_preview}', flush=True)
+    print(f'[recycle-dryrun] existing state: {already}', flush=True)
+    print(f'[recycle-dryrun] NOTE: covered-deal exclusion not applied here — live '
+          'run drops any with an open/closed-won deal, so real numbers are lower.', flush=True)
+    for s in samples:
+        print(f'[recycle-dryrun]   would-warn e.g. {s}', flush=True)
+    print('[recycle-dryrun] ===== end preview =====', flush=True)
+
+
+def recycle_dry_run_once():
+    """Run the dry-run once at startup iff RECYCLE_DRY_RUN=1. Never raises."""
+    if os.environ.get('RECYCLE_DRY_RUN') != '1':
+        return
+    time.sleep(20)                                       # let startup settle
+    try:
+        recycle_dry_run()
+    except Exception as e:
+        print(f'[recycle-dryrun] error: {e}', flush=True)
+
+
+# --- Account recycling: the LIVE warn (Thu) + release (Mon) pipeline ---
+# Actions only fire when RECYCLE_ENABLED=1; otherwise each run LOGS what it would
+# do (a scheduled dry-run) and touches nothing. Self-serve claim model: release
+# posts the pool digest with Claim buttons; ownership only changes when a BDR clicks.
+
+def _hs_set_recycle_status(cid, state):
+    """Patch a company's recycle_status (the single lifecycle property, shared with
+    the claim flow). Returns True on success."""
+    r = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}',
+                        headers=HS, json={'properties': {'recycle_status': state}}, timeout=30)
+    return bool(r is not None and r.ok)
+
+
+def _recycle_next_monday(now):
+    """(deadline_str, days_left) for the coming Monday release."""
+    days_ahead = (0 - now.weekday()) % 7 or 7           # Mon=0; never 'today'
+    monday = now + timedelta(days=days_ahead)
+    return monday.strftime('%a %b %d').replace(' 0', ' '), days_ahead
+
+
+def run_recycle(phase, live):
+    """Execute one recycle phase ('warn' or 'release') over all BDR-owned companies.
+    live=False logs intentions only. Deal-covered candidates are excluded (and
+    pulled out of any warned/pool state). Returns a counts dict."""
+    now = datetime.now(timezone.utc)
+    tag = 'live' if live else 'dry'
+    counts = {'warn': 0, 'warn_no_dm': 0, 'release': 0, 'reset': 0, 'excluded_deal': 0}
+    pool = []
+    for c in _fetch_bdr_owned_companies():
+        cid = str(c.get('id'))
+        p = c.get('properties', {})
+        name = p.get('name') or cid
+        sdr = (p.get('sdr_owner') or '').strip()
+        d = recycle.decide(p, now, phase)
+        act = d['action']
+        if act in ('warn', 'release') and hs_company_has_covered_deal(cid) is not False:
+            counts['excluded_deal'] += 1
+            if (p.get('recycle_status') or '').strip() in (recycle.WARNED, recycle.POOL) and live:
+                _hs_set_recycle_status(cid, recycle.WARM)   # covered now — pull it out
+            continue
+        if act == 'warn':
+            deadline, days_left = _recycle_next_monday(now)
+            print(f'[recycle][{tag}] WARN {name} ({sdr}) — {d["reason"]}', flush=True)
+            if not live:
+                counts['warn'] += 1
+            else:
+                # Only advance to 'warned' if the DM actually reached the owner —
+                # otherwise Monday would release the account with NO warning ever
+                # sent. An unmapped/failed owner stays warm and is retried next week.
+                uid = SDR_SLACK_REV.get(sdr)
+                sent = False
+                if uid:
+                    try:
+                        app.client.chat_postMessage(channel=uid,
+                            text=recycle.warn_dm_text(name, deadline, days_left))
+                        sent = True
+                    except Exception as e:
+                        print(f'[recycle] DM {sdr} failed: {e}', flush=True)
+                if sent:
+                    _hs_set_recycle_status(cid, recycle.WARNED)
+                    counts['warn'] += 1
+                else:
+                    counts['warn_no_dm'] += 1
+                    print(f'[recycle] no DM for {sdr!r} (unmapped/failed) — left warm, will retry', flush=True)
+        elif act == 'release':
+            counts['release'] += 1
+            pool.append({'id': cid, 'name': name,
+                         'note': f'cold {recycle.days_since_activity(p, now)}d'})
+            print(f'[recycle][{tag}] RELEASE {name} ({sdr}) — {d["reason"]}', flush=True)
+            # NB: recycle_status is set to 'pool' only AFTER the digest posts (below),
+            # so a failed post never orphans an account as 'pool' with no Claim button.
+        elif act == 'reset':
+            counts['reset'] += 1
+            if live:
+                _hs_set_recycle_status(cid, recycle.WARM)
+    if phase == 'release' and pool:
+        print(f'[recycle][{tag}] POST digest — {len(pool)} accounts to {recycle.RECYCLE_CHANNEL}', flush=True)
+        if live:
+            posted = _post_pool_digest(pool)
+            if posted < len(pool):
+                print(f'[recycle] {len(pool) - posted} account(s) not posted — left warned, '
+                      'will retry next cycle', flush=True)
+    print(f'[recycle][{tag}] {phase} done: {counts}', flush=True)
+    return counts
+
+
+def _post_pool_digest(pool, chunk=45):
+    """Post the up-for-grabs digest in chunks under Slack's 50-block-per-message
+    limit (header + one row per account). An account is patched to 'pool' only
+    after ITS chunk posts, so a failed/oversized post never leaves it marked
+    'pool' with no Claim button. Returns the count actually posted."""
+    posted = 0
+    for i in range(0, len(pool), chunk):
+        part = pool[i:i + chunk]
+        try:
+            app.client.chat_postMessage(channel=recycle.RECYCLE_CHANNEL,
+                blocks=recycle.pool_digest_blocks(part), text='Up for grabs this week')
+        except Exception as e:
+            print(f'[recycle] digest chunk post failed: {e}', flush=True)
+            continue
+        for a in part:
+            _hs_set_recycle_status(a['id'], recycle.POOL)
+        posted += len(part)
+    return posted
+
+
+def recycle_loop():
+    """Fire the warn scan on Thursdays and the release+post on Mondays, at most
+    once per phase per ISO week. Marker files survive the 30-min os._exit(0)
+    restarts (same pattern as sheet_reconcile_loop) so each boot is a no-op until
+    the day/week rolls over."""
+    time.sleep(90)
+    base = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            phase = {3: 'warn', 0: 'release'}.get(now.weekday())   # Mon=0 .. Thu=3
+            if phase:
+                marker = os.path.join(base, f'.recycle_{phase}_{now.strftime("%G-W%V")}')
+                if not os.path.exists(marker):
+                    # Claim the week BEFORE running: periodic_restart() os._exit(0)s
+                    # every ~30 min, so writing the marker after a partial run would
+                    # let a mid-run kill re-fire the whole phase (double DMs/digest).
+                    # The state machine is idempotent (warned/pool -> noop), so a rare
+                    # crash just leaves a few accounts for next week's run.
+                    with open(marker, 'w') as f:
+                        f.write(now.isoformat())
+                    live = os.environ.get('RECYCLE_ENABLED') == '1'
+                    run_recycle(phase, live)
+        except Exception as e:
+            print(f'[recycle] loop error: {e}', flush=True)
+        time.sleep(3600)
 
 
 @app.event('message')
@@ -2822,4 +3088,10 @@ if __name__ == '__main__':
                     print(f'[credit-retry] loop error: {e}', flush=True)
 
         threading.Thread(target=_credit_retry_loop, daemon=True).start()
+    threading.Thread(target=recycle_dry_run_once, daemon=True).start()
+    if os.environ.get('RECYCLE_DRY_RUN') == '1':
+        print('[recycle-dryrun] READ-ONLY preview scheduled (no DMs, no writes)')
+    threading.Thread(target=recycle_loop, daemon=True).start()
+    print('[recycle] warn(Thu)/release(Mon) loop started — '
+          + ('LIVE' if os.environ.get('RECYCLE_ENABLED') == '1' else 'dry-run (RECYCLE_ENABLED!=1)'))
     handler.start()
