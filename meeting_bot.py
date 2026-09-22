@@ -41,6 +41,7 @@ import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
+import recycle
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -1302,6 +1303,95 @@ def handle_claim_account(ack, body, client, action):
                 text=f"{sdr} claimed *{name}* from you — it was 30+ days cold.")
         except Exception as e:
             print(f'[claim] old-owner DM failed: {e}', flush=True)
+
+
+# --- Account recycling: READ-ONLY dry-run probe ---
+# Computes what the warn/release pipeline WOULD do and only logs it. Sends no
+# DMs, writes nothing to HubSpot, posts to no channel. Gated behind RECYCLE_DRY_RUN=1
+# so it never runs by accident. Its whole job is to hand real numbers to leadership
+# (how many accounts would be pooled, and — critically — whether HubSpot's
+# hs_last_activity_date is actually populated) before we arm anything live.
+
+def _fetch_bdr_owned_companies():
+    """All companies owned by one of the 5 BDRs, paginated (bounded at 1000).
+    Read-only. Returns raw HubSpot result dicts (props under 'properties')."""
+    body = {
+        'filterGroups': [{'filters': [
+            {'propertyName': 'sdr_owner', 'operator': 'IN',
+             'values': sorted(set(SDR_SLACK.values()))},
+        ]}],
+        'properties': ['name', 'sdr_owner', 'recycle_state', 'hs_last_activity_date'],
+        'limit': 100,
+    }
+    results, after = [], None
+    for _ in range(10):                                  # bounded pagination
+        if after:
+            body['after'] = after
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/companies/search',
+                          headers=HS, json=body, timeout=30)
+        if r.status_code != 200:
+            print(f'[recycle-dryrun] company search failed: {r.status_code} {r.text[:200]}', flush=True)
+            break
+        data = r.json()
+        results += data.get('results', [])
+        after = ((data.get('paging') or {}).get('next') or {}).get('after')
+        if not after:
+            break
+    return results
+
+
+def recycle_dry_run():
+    """Log-only preview of the recycling pipeline. No side effects."""
+    now = datetime.now(timezone.utc)
+    companies = _fetch_bdr_owned_companies()
+    total = len(companies)
+    missing_activity = 0
+    would_warn = {}                                      # sdr -> count
+    would_pool_preview = 0                               # ≥RELEASE_DAYS regardless of warn state
+    already = {'warned': 0, 'pool': 0}
+    samples = []
+    for c in companies:
+        p = c.get('properties', {})
+        sdr = (p.get('sdr_owner') or '').strip()
+        state = (p.get('recycle_state') or '').strip()
+        if state in already:
+            already[state] += 1
+        if recycle.days_since_activity(p, now) is None:
+            missing_activity += 1
+            continue
+        if recycle.decide(p, now, 'warn')['action'] == 'warn':
+            would_warn[sdr] = would_warn.get(sdr, 0) + 1
+            if len(samples) < 10:
+                samples.append(f"{p.get('name') or c.get('id')} ({sdr}, "
+                               f"{recycle.days_since_activity(p, now)}d)")
+        if recycle.is_cold(p, now, recycle.RELEASE_DAYS):
+            would_pool_preview += 1
+    print('[recycle-dryrun] ===== READ-ONLY preview (no DMs, no writes) =====', flush=True)
+    print(f'[recycle-dryrun] BDR-owned companies: {total}', flush=True)
+    print(f'[recycle-dryrun] MISSING hs_last_activity_date: {missing_activity}'
+          f' ({0 if not total else round(100*missing_activity/total)}%) '
+          '<- if high, the cold signal is unusable', flush=True)
+    print(f'[recycle-dryrun] would WARN this cycle: {sum(would_warn.values())} '
+          f'-> {would_warn}', flush=True)
+    print(f'[recycle-dryrun] ≥{recycle.RELEASE_DAYS}d cold (pool volume preview): '
+          f'{would_pool_preview}', flush=True)
+    print(f'[recycle-dryrun] existing state: {already}', flush=True)
+    print(f'[recycle-dryrun] NOTE: covered-deal exclusion not applied here — live '
+          'run drops any with an open/closed-won deal, so real numbers are lower.', flush=True)
+    for s in samples:
+        print(f'[recycle-dryrun]   would-warn e.g. {s}', flush=True)
+    print('[recycle-dryrun] ===== end preview =====', flush=True)
+
+
+def recycle_dry_run_once():
+    """Run the dry-run once at startup iff RECYCLE_DRY_RUN=1. Never raises."""
+    if os.environ.get('RECYCLE_DRY_RUN') != '1':
+        return
+    time.sleep(20)                                       # let startup settle
+    try:
+        recycle_dry_run()
+    except Exception as e:
+        print(f'[recycle-dryrun] error: {e}', flush=True)
 
 
 @app.event('message')
@@ -2862,4 +2952,7 @@ if __name__ == '__main__':
                     print(f'[credit-retry] loop error: {e}', flush=True)
 
         threading.Thread(target=_credit_retry_loop, daemon=True).start()
+    threading.Thread(target=recycle_dry_run_once, daemon=True).start()
+    if os.environ.get('RECYCLE_DRY_RUN') == '1':
+        print('[recycle-dryrun] READ-ONLY preview scheduled (no DMs, no writes)')
     handler.start()
