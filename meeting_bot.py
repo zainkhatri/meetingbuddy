@@ -39,6 +39,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 import sheet_sync
 import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
+import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
 import recycle
 
@@ -71,10 +72,6 @@ CREATE_DEMO_DEALS = os.environ.get('CREATE_DEMO_DEALS', '1') == '1'
 # guessing the type from header tags like "DEMO" vs "TARGET MARKETS MEETING".
 DEMOS_BOOKED_CHANNEL = 'C0AJL106QJJ'
 CONFERENCE_MEETINGS_CHANNEL = 'C0B9Z8562RL'
-# AE blitz is owned by conference_buddy now — meetingbuddy runs no blitz leaderboard.
-# It only keeps EXCLUDING this channel from booking processing so a blitz post can
-# never leak into the CRM (defense-in-depth if the bot is ever a member there).
-AE_BLITZ_CHANNEL_ID = os.environ.get('BLITZ_CHANNEL_ID')
 CHANNEL_PROFILE = {
     DEMOS_BOOKED_CHANNEL:        {'meeting_type': 'demo',       'is_conference': False, 'duration_min': 30},
     CONFERENCE_MEETINGS_CHANNEL: {'meeting_type': 'conference', 'is_conference': True,  'duration_min': 15},
@@ -1538,9 +1535,9 @@ def handle_message(event, client, say, logger):
     # Bot messages: skip
     if event.get('bot_id'):
         return
-    # AE blitz channel is owned by conference_buddy: ignore its Slack posts
-    # entirely (never enter the booking pipeline). Inert unless BLITZ_CHANNEL_ID set.
-    if AE_BLITZ_CHANNEL_ID and event.get('channel') == AE_BLITZ_CHANNEL_ID:
+    # AE blitz channel is calendar-sourced: ignore Slack posts here entirely
+    # (never enter the booking pipeline). Inert unless BLITZ_CHANNEL_ID is set.
+    if blitz_calendar.BLITZ_CHANNEL_ID and event.get('channel') == blitz_calendar.BLITZ_CHANNEL_ID:
         return
     subtype = event.get('subtype')
     # Edits: extract the new message and reprocess. Downstream HubSpot lookups
@@ -1884,10 +1881,10 @@ def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner
 
 
 def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, poster=None):
-    # AE/ITC blitz channel: never write anything to HubSpot from here. Blitz is
-    # owned by conference_buddy; this guard is defense-in-depth so no caller (live
+    # AE/ITC blitz channel: never write anything to HubSpot from here. The blitz
+    # is calendar-sourced; this guard is defense-in-depth so no caller (live
     # handler, replay, live-sweep) can leak a blitz-channel post into the CRM.
-    if channel and AE_BLITZ_CHANNEL_ID and channel == AE_BLITZ_CHANNEL_ID:
+    if channel and blitz_calendar.BLITZ_CHANNEL_ID and channel == blitz_calendar.BLITZ_CHANNEL_ID:
         return
     # Test channel: run the real parse -> ICP -> VP+ nudge, but write NOTHING to
     # HubSpot (no contact/company/meeting/deal). Guard lives here so EVERY caller
@@ -2457,8 +2454,8 @@ def replay_missed_messages():
             user_id = m.get('user')
             if not ts or not user_id:
                 continue
-            # Blitz channel is owned by conference_buddy: never process its posts as bookings
-            if AE_BLITZ_CHANNEL_ID and cid == AE_BLITZ_CHANNEL_ID:
+            # Blitz channel is calendar-sourced: never process its posts as bookings
+            if blitz_calendar.BLITZ_CHANNEL_ID and cid == blitz_calendar.BLITZ_CHANNEL_ID:
                 continue
             try:
                 parsed_raw = parse_with_claude(text)
@@ -2929,8 +2926,8 @@ def live_sweep_loop():
                     user_id = m.get('user')
                     if not text or not ts or not user_id:
                         continue
-                    # Blitz channel is owned by conference_buddy: never process its posts as bookings
-                    if AE_BLITZ_CHANNEL_ID and cid == AE_BLITZ_CHANNEL_ID:
+                    # Blitz channel is calendar-sourced: never process its posts as bookings
+                    if blitz_calendar.BLITZ_CHANNEL_ID and cid == blitz_calendar.BLITZ_CHANNEL_ID:
                         continue
                     if not _looks_like_booking(text):
                         continue
@@ -3069,6 +3066,9 @@ if __name__ == '__main__':
     print('[rest-watchdog] Slack REST auth.test watchdog started (every 5 min)')
     threading.Thread(target=periodic_restart, daemon=True).start()
     print('[periodic-restart] scheduled in 1800s')
+    if blitz_calendar.BLITZ_CHANNEL_ID and blitz_calendar.BLITZ_AES:
+        threading.Thread(target=blitz_calendar.run_poller, args=(app.client,), daemon=True).start()
+        print(f'[blitz] calendar poller started ({len(blitz_calendar.BLITZ_AES)} AEs)')
     if CREDIT_BY_CALENDAR:
         def _credit_retry_ctx(ctx):                   # deal_id is already carried in ctx
             return calendar_credit.credit_after_booking(
