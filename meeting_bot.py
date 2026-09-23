@@ -2462,6 +2462,28 @@ def replay_missed_messages():
             # Blitz channel is calendar-sourced: never process its posts as bookings
             if blitz_calendar.BLITZ_CHANNEL_ID and cid == blitz_calendar.BLITZ_CHANNEL_ID:
                 continue
+            # Replay-dedup guard: if any HubSpot meeting already carries this
+            # Slack post's booked_at, the post was processed on a prior run.
+            # Check BEFORE parsing — every 30-min restart replays the last 24h,
+            # so parsing first would re-run Claude on already-logged bookings
+            # ~48x/day for nothing. The HubSpot search is cheap; the parse is not.
+            # (Re-parsing also risked Claude normalizing a name differently and
+            # creating a parallel record the reconciler then has to merge, e.g.
+            # "Franklin Maddison" vs "Franklin Madison".)
+            booked_ms = int(float(ts) * 1000)
+            try:
+                dup_search = requests.post(
+                    'https://api.hubapi.com/crm/v3/objects/meetings/search',
+                    headers=HS,
+                    json={'filterGroups': [{'filters': [
+                        {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
+                    ]}], 'properties': ['hs_meeting_title'], 'limit': 1},
+                    timeout=15)
+                if dup_search.status_code == 200 and dup_search.json().get('total', 0) > 0:
+                    print(f'[replay] skip ts={ts}: booked_at already tagged — skipped parse')
+                    continue
+            except Exception as e:
+                print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
             try:
                 parsed_raw = parse_with_claude(text)
             except Exception:
@@ -2473,25 +2495,6 @@ def replay_missed_messages():
             if not bookings:
                 continue
             owner_id = slack_user_to_owner(app.client, user_id)
-            # Replay-dedup guard: if any HubSpot meeting already carries this
-            # Slack post's booked_at, the post was processed on a prior run.
-            # Re-running risks Claude normalizing a name differently and
-            # creating a parallel record the reconciler then has to merge
-            # (e.g. "Franklin Maddison" vs "Franklin Madison").
-            booked_ms = int(float(ts) * 1000)
-            try:
-                dup_search = requests.post(
-                    'https://api.hubapi.com/crm/v3/objects/meetings/search',
-                    headers=HS,
-                    json={'filterGroups': [{'filters': [
-                        {'propertyName': 'booked_at', 'operator': 'EQ', 'value': str(booked_ms)},
-                    ]}], 'properties': ['hs_meeting_title'], 'limit': 1},
-                    timeout=15)
-                if dup_search.status_code == 200 and dup_search.json().get('total', 0) > 0:
-                    print(f'[replay] skip ts={ts}: booked_at already tagged on an existing meeting')
-                    continue
-            except Exception as e:
-                print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
             any_ok = False
             for parsed in bookings:
                 try:
