@@ -325,6 +325,15 @@ _CONF_RULES = [
     (r'\bwsia\b',                         'wsia_uw_summit'),
     (r'\binsure?tech[\s_]?ny[\s_]?(spring)?\b', 'insurtech_ny_spring'),
     (r'\bitny\d*\b',                      'insurtech_ny_spring'),
+    # ITC / InsureTech Connect (Vegas) -> canonical bucket itc_2026. Insights/NY
+    # patterns above match first, so a generic insure?tech-connect can't steal them.
+    (r'\binsure?tech[\s_]+connect',       'itc_2026'),
+    (r'\bitc[\s_]?vegas\b',               'itc_2026'),
+    (r'\bitc\b',                          'itc_2026'),
+    # BrokerTech Connect / BrokerTech Ventures -> canonical bucket broker_tech_connect_2026.
+    (r'\bbroker[\s_]?tech[\s_]+connect',  'broker_tech_connect_2026'),
+    (r'\bbtc\b',                          'broker_tech_connect_2026'),
+    (r'\bbtv\b',                          'broker_tech_connect_2026'),
     (r'\btmpaa\b',                        'tmpaa'),
     (r'\btmpcc\b',                        'tmpcc'),
     (r'target[\s_]markets',               'tmpaa'),
@@ -424,6 +433,8 @@ _CONF_DATE_WINDOWS = [
     ('2026-05-11', '2026-05-12', 'insurance_innovators'),  # Music City Center, Nashville
     ('2026-06-03', '2026-06-04', 'insurtech_insights'),    # New York
     ('2026-06-24', '2026-06-26', 'future_of_insurance'),   # ponytail: Chicago; widen if FOI meetings land outside this window
+    ('2026-08-31', '2026-09-03', 'broker_tech_connect_2026'),  # BrokerTech Connect (Chicago)
+    ('2026-09-29', '2026-10-01', 'itc_2026'),              # InsureTech Connect (Vegas)
 ]
 
 def detect_conference_from_date(date_str):
@@ -1922,6 +1933,14 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
     # And default meeting_type to "conference" for conference-sourced meetings
     # unless Claude already classified as something more specific (demo/intro/etc.).
     if not parsed.get('meeting_type') and parsed.get('conference_source'):
+        parsed['meeting_type'] = 'conference'
+
+    # Header/title is AUTHORITATIVE for known conferences (deterministic). Overrides
+    # Claude's guess and -- by setting a concrete slug -- skips the LLM auto-create below,
+    # which is what fragmented ITC/BTC into duplicate buckets (itc_2026 / itc_app_2026 / ...).
+    hdr_conf = detect_conference_from_title(text)
+    if hdr_conf:
+        parsed['conference_source'] = hdr_conf
         parsed['meeting_type'] = 'conference'
 
     # New/unknown conference → resolve to a real HubSpot bucket (create if needed).
