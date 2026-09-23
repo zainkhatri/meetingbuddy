@@ -1578,10 +1578,15 @@ def handle_message(event, client, say, logger):
 
     # Parse — Claude may return a single dict or a list of dicts (multi-booking post)
     parsed_raw = parse_with_claude(text)
-    # Parse error (API/JSON failure) — alert in-thread instead of dropping silently.
-    # The 30-min periodic-restart replay will re-attempt, but surface it now so a
-    # real booking is never lost without anyone noticing.
+    # Parse error (API/JSON failure). Only alert on booking-shaped messages —
+    # replay re-attempts exactly those (it gates on _looks_like_booking), so the
+    # "retry on next restart" promise is only true there. A transient API blip on
+    # chatter ("Let's go Dani!!") has nothing to log and nothing to retry, so stay
+    # quiet instead of posting a scary (and false) warning in-thread.
     if isinstance(parsed_raw, dict) and parsed_raw.get('_parse_error'):
+        if not _looks_like_booking(text):
+            print(f'[live] parse error on non-booking chatter ts={ts} — no alert', flush=True)
+            return
         try:
             say(text="⚠️ I hit an error parsing this and did NOT log it. I'll retry "
                      "automatically on my next restart — or edit/repost to re-trigger.",
