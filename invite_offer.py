@@ -193,17 +193,22 @@ def _last_name(name: str) -> str:
     return parts[-1] if len(parts) >= 2 and len(parts[-1]) >= 3 else ""
 
 
+def _first_name(name: str) -> str:
+    parts = re.findall(r"[a-z'-]+", (name or "").lower())
+    return parts[0] if len(parts) >= 2 and len(parts[0]) >= 3 else ""
+
+
 def invite_exists_in(events, prospect_email: str, company: str, prospect_name: str = "") -> bool:
     """True if any non-cancelled event already covers this prospect:
-    (1) prospect email is a guest; (2) prospect last name in the title or a guest's
-    display name (ITC-app/grip invites carry no prospect email); (3) company core
-    word in the title, UNLESS that event's guests include a different person at the
-    prospect's domain (a second contact at the same company is a separate meeting)."""
+    (1) prospect email is a guest; (2) prospect last name in the title, a guest's
+    display name, or a guest's email local part (ITC-app/grip invites carry no
+    prospect email); (3) company core word in the title of an invite with NO outside
+    guests (teammate placeholder / ITC-app invite). An invite with other outside
+    people is a different contact's meeting (3 Cincinnati contacts = 3 meetings)."""
     assert isinstance(events, list), "events must be a list"
     assert isinstance(prospect_email, str), "prospect_email must be str"
     email = prospect_email.strip().lower()
-    dom = email.split("@", 1)[1] if "@" in email else ""
-    core, last = _company_core(company), _last_name(prospect_name)
+    core, last, first = _company_core(company), _last_name(prospect_name), _first_name(prospect_name)
     for ev in events[:MAX_EVENTS]:   # bounded
         if ev.get("status") == "cancelled":
             continue
@@ -215,12 +220,22 @@ def invite_exists_in(events, prospect_email: str, company: str, prospect_name: s
         names = " ".join((a.get("displayName") or "").lower() for a in att)
         if last and re.search(rf"\b{re.escape(last)}\b", f"{title} {names}"):
             return True
-        # name only in the guest's address: bseiter@, jen.jennings@, keishasmith@
-        if last and any(last in g.split("@", 1)[0] for g in guests
-                        if g and not g.endswith("@" + DOMAIN) and "gripcontact" not in g):
+        # name only in the guest's address: bseiter@, jen.jennings@, mcqueb2@, and
+        # mark@ / brett@ when the title also names the company
+        ext_locals = [g.split("@", 1)[0] for g in guests
+                      if g and not g.endswith("@" + DOMAIN) and "gripcontact" not in g]
+        if last and any(last in lp or (len(last) >= 5 and lp.startswith(last[:5])) for lp in ext_locals):
             return True
-        other_contact = dom and any(g.endswith("@" + dom) and g != email for g in guests)
-        if core and not other_contact and re.search(rf"\b{re.escape(core)}\b", title):
+        co_in_title = bool(core) and bool(re.search(rf"\b{re.escape(core)}\b", title))
+        if first and co_in_title and any(re.match(rf"{re.escape(first)}(?![a-z])", lp) for lp in ext_locals):
+            return True
+        # company word in the title only counts for placeholder / ITC-app invites
+        # (no outside guests). An invite WITH outside people who aren't our
+        # prospect (rules 1-2 didn't match them) is someone else's meeting.
+        outside = [g for g in guests if g and g != email and not g.endswith("@" + DOMAIN)
+                   and "gripcontact" not in g and "resource.calendar.google.com" not in g
+                   and "group.calendar.google.com" not in g]
+        if co_in_title and not outside:
             return True
     return False
 

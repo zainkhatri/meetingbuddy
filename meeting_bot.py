@@ -2491,7 +2491,7 @@ def replay_missed_messages():
             any_ok = False
             for parsed in bookings:
                 try:
-                    _process_booking(parsed, text, owner_id, ts, app.client, silent_say, channel=cid)
+                    _process_booking(parsed, text, owner_id, ts, app.client, silent_say, channel=cid, poster=user_id)
                     processed += 1
                     any_ok = True
                 except Exception as e:
@@ -2966,7 +2966,7 @@ def live_sweep_loop():
                     silent_say = lambda **kw: None
                     for parsed in bookings:
                         try:
-                            _process_booking(parsed, text, owner_id, ts, app.client, silent_say, channel=cid)
+                            _process_booking(parsed, text, owner_id, ts, app.client, silent_say, channel=cid, poster=user_id)
                         except Exception as e:
                             print(f'[sweep] process error ts={ts}: {e}')
         except Exception as e:

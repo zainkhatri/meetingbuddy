@@ -408,3 +408,34 @@ def test_token_cached_per_user(monkeypatch):
     assert io._token("a@furtherai.com") == "t-a@furtherai.com"
     assert io._token("b@furtherai.com") == "t-b@furtherai.com"
     assert n["mint"] == 2
+
+
+def test_other_contacts_meeting_does_not_block_when_email_unknown():
+    # MSIG 2026-09-28: Aika Kikuchi (no email) vs Nick's intro with Will Handley
+    ev = {"summary": "Nick <> Will FurtherAI & MSIG Intro",
+          "attendees": [{"email": "whandley@msigusa.com"}, {"email": "nick.n@furtherai.com"},
+                        {"email": "c_188@resource.calendar.google.com"}]}
+    assert io.invite_exists_in([ev], "", "MSIG", "Aika Kikuchi") is False
+
+
+def test_itc_app_placeholder_still_blocks_on_company():
+    ev = {"summary": "Meeting with A. K. (MSIG) at 1619",
+          "attendees": [{"email": "calendar+1@mg.gripcontact.com"}, {"email": "ben@furtherai.com"}]}
+    assert io.invite_exists_in([ev], "", "MSIG", "Aika Kikuchi") is True
+
+
+def test_first_name_address_plus_company_title():
+    ev = {"summary": "ITC - FurtherAI // Statement Insurance", "attendees": [{"email": "mark@statementinsurance.com"}]}
+    assert io.invite_exists_in([ev], "", "Statement Insurance Agency", "Mark Hutchings") is True
+    ev2 = {"summary": "FurtherAI // Meslee (ITC Connect)", "attendees": [{"email": "brett@meslee.com"}]}
+    assert io.invite_exists_in([ev2], "", "Meslee Insurance Services", "Brett Tucker") is True
+
+
+def test_first_name_without_company_title_does_not_match():
+    ev = {"summary": "Coffee chat", "attendees": [{"email": "mark@othercorp.com"}]}
+    assert io.invite_exists_in([ev], "", "Statement Insurance Agency", "Mark Hutchings") is False
+
+
+def test_truncated_last_name_address():
+    ev = {"summary": "ITC - FurtherAI + Nationwide", "attendees": [{"email": "mcqueb2@nationwide.com"}]}
+    assert io.invite_exists_in([ev], "", "Nationwide", "Brandon McQueen") is True
