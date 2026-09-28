@@ -136,3 +136,43 @@ def test_allowlist_limits_offers_to_listed_posters(monkeypatch):
 def test_no_allowlist_means_everyone(monkeypatch):
     monkeypatch.delenv('INVITE_POSTERS', raising=False)
     assert len(_run(monkeypatch).posted) == 1
+
+
+class _ActClient:
+    def __init__(self): self.updates, self.eph = [], []
+    def chat_update(self, **kw): self.updates.append(kw)
+    def chat_postEphemeral(self, **kw): self.eph.append(kw)
+
+
+def _click(monkeypatch, status, has_buttons):
+    offer = {'organizer': 'zain@furtherai.com', 'poster_slack': 'U1', 'prospect_name': 'P Q',
+             'prospect_email': 'p@x.com', 'company': 'X', 'start_utc': '2099-01-01T00:00:00Z',
+             'duration_min': 15, 'is_conference': True, 'conf_short': 'ITC', 'location': 'B',
+             'ae_email': '', 'ae_name': ''}
+    monkeypatch.setattr(invite_offer, 'send_invite', lambda *a, **k: {'status': status})
+    c = _ActClient()
+    blocks = [{'type': 'actions'}] if has_buttons else [{'type': 'section'}]
+    body = {'user': {'id': 'U1'}, 'channel': {'id': 'C1'}, 'message': {'ts': '1.2', 'blocks': blocks}}
+    mb.handle_invite_send(lambda: None, body, c, {'value': invite_offer.encode_payload(offer)})
+    return c
+
+
+def test_first_click_updates_message(monkeypatch):
+    c = _click(monkeypatch, 'sent', True)
+    assert len(c.updates) == 1 and 'Invite sent' in c.updates[0]['blocks'][0]['text']['text']
+
+
+def test_late_second_click_does_not_overwrite_success(monkeypatch):
+    c = _click(monkeypatch, 'already_exists', False)
+    assert c.updates == [] and any('already' in e['text'] for e in c.eph)
+
+
+def test_non_poster_click_rejected(monkeypatch):
+    offer_body = {'user': {'id': 'U_RANDO'}, 'channel': {'id': 'C1'}, 'message': {'ts': '1.2', 'blocks': []}}
+    c = _ActClient()
+    called = []
+    monkeypatch.setattr(invite_offer, 'send_invite', lambda *a, **k: called.append(1))
+    offer = {k: '' for k in invite_offer._PAYLOAD_KEYS}
+    offer.update(poster_slack='U1', start_utc='2099-01-01T00:00:00Z', prospect_email='p@x.com')
+    mb.handle_invite_send(lambda: None, offer_body, c, {'value': invite_offer.encode_payload(offer)})
+    assert called == [] and 'Only the person' in c.eph[0]['text']
