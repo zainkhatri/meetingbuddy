@@ -1,3 +1,5 @@
+> **Superseded 2026-09-28.** This pipeline was never armed and has been removed from meetingbuddy. Account recycling lives in hubspot-cleanup (`live/weekly_claim.py`: Monday warning DM → Tuesday #sales post). meetingbuddy keeps only the `claim_account` button handler.
+
 # Account Recycling — cold-clock → warn → weekly pool (design)
 
 **Date:** 2026-09-21
