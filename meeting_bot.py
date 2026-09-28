@@ -1722,6 +1722,8 @@ def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, dura
     posting) and check the whole team's calendars before posting the preview."""
     if not invite_offer.enabled() or channel not in CHANNEL_PROFILE or not (ts and poster):
         return
+    if not invite_offer.poster_allowed(poster):
+        return  # quiet rollout: offers only for INVITE_POSTERS
     if synced_url:
         print(f'[invite] ts={ts} offer=False reason=calendar_synced_meeting', flush=True)
         return

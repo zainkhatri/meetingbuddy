@@ -44,6 +44,14 @@ def enabled() -> bool:
     return os.environ.get("AUTO_INVITE", "0").strip() == "1"
 
 
+def poster_allowed(poster_slack: str) -> bool:
+    """INVITE_POSTERS (comma Slack ids) limits offers to those bookers, e.g. during a
+    quiet rollout before the team knows. Unset/empty = everyone."""
+    assert poster_slack is None or isinstance(poster_slack, str), "poster must be str"
+    allow = {s.strip() for s in os.environ.get("INVITE_POSTERS", "").split(",") if s.strip()}
+    return (not allow) or (poster_slack in allow)
+
+
 def admins() -> set:
     raw = os.environ.get("INVITE_ADMIN_SLACK_IDS", "U0AGP9NCBA5")  # Zain
     return {s.strip() for s in raw.split(",") if s.strip()}

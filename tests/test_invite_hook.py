@@ -124,3 +124,15 @@ def test_every_process_booking_caller_passes_poster():
     src = open(mb.__file__).read()
     calls = [m for m in re.findall(r"_process_booking\(([^\n]*)\)", src) if not m.startswith('parsed, text, owner_id, ts, client, say, channel=None')]
     assert calls and all('poster=' in c for c in calls), calls
+
+
+def test_allowlist_limits_offers_to_listed_posters(monkeypatch):
+    monkeypatch.setenv('INVITE_POSTERS', 'U_SOMEONE_ELSE')
+    assert _run(monkeypatch).posted == []
+    monkeypatch.setenv('INVITE_POSTERS', 'U_ZAIN,U_OTHER')
+    assert len(_run(monkeypatch).posted) == 1
+
+
+def test_no_allowlist_means_everyone(monkeypatch):
+    monkeypatch.delenv('INVITE_POSTERS', raising=False)
+    assert len(_run(monkeypatch).posted) == 1
