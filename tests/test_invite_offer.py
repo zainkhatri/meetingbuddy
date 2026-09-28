@@ -439,3 +439,10 @@ def test_first_name_without_company_title_does_not_match():
 def test_truncated_last_name_address():
     ev = {"summary": "ITC - FurtherAI + Nationwide", "attendees": [{"email": "mcqueb2@nationwide.com"}]}
     assert io.invite_exists_in([ev], "", "Nationwide", "Brandon McQueen") is True
+
+
+def test_poster_allowed(monkeypatch):
+    monkeypatch.delenv("INVITE_POSTERS", raising=False)
+    assert io.poster_allowed("U1") is True
+    monkeypatch.setenv("INVITE_POSTERS", " U2 , U3 ")
+    assert io.poster_allowed("U3") is True and io.poster_allowed("U1") is False

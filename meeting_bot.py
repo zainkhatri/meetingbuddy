@@ -1722,6 +1722,8 @@ def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, dura
     posting) and check the whole team's calendars before posting the preview."""
     if not invite_offer.enabled() or channel not in CHANNEL_PROFILE or not (ts and poster):
         return
+    if not invite_offer.poster_allowed(poster):
+        return  # quiet rollout: offers only for INVITE_POSTERS
     if synced_url:
         print(f'[invite] ts={ts} offer=False reason=calendar_synced_meeting', flush=True)
         return
@@ -1816,9 +1818,13 @@ def handle_invite_send(ack, body, client, action):
                                            f"Try again or send it manually.")
             return
         print(f"[invite] {out['status']} {title} by {uid}", flush=True)
-        if msg_ts:
+        still_has_buttons = any(b.get('type') == 'actions'
+                                for b in ((body.get('message') or {}).get('blocks') or []))
+        if msg_ts and (out['status'] == 'sent' or still_has_buttons):
             client.chat_update(channel=ch, ts=msg_ts, text=f"{_INVITE_MARK} (handled)",
                                blocks=_invite_done_blocks(text))
+        else:  # late second click: keep the "✓ Invite sent" message, answer privately
+            client.chat_postEphemeral(channel=ch, user=uid, text=text)
 
 
 @app.action('invite_skip')
