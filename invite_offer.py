@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
@@ -25,6 +26,8 @@ import vp_escalation as vp
 PT = ZoneInfo("America/Los_Angeles")
 DOMAIN = "furtherai.com"
 MAX_EVENTS = 250            # per calendar window fetch (bounded)
+WINDOW_DAYS = 3             # invites drift up to 2 days from the Slack post
+IMMINENT_MIN = 60           # never offer for a meeting starting within the hour
 _PAYLOAD_KEYS = ("organizer", "poster_slack", "prospect_name", "prospect_email", "company",
                  "start_utc", "duration_min", "is_conference", "conf_short", "location",
                  "ae_email", "ae_name")
@@ -104,8 +107,11 @@ def decide_offer(offer: dict, *, invite_exists: Optional[bool], now: datetime):
         return (False, "internal_email")
     if not offer.get("start_utc"):
         return (False, "no_time")
-    if _parse_utc(offer["start_utc"]) <= now:
+    start = _parse_utc(offer["start_utc"])
+    if start <= now:
         return (False, "past")
+    if start - now < timedelta(minutes=IMMINENT_MIN):
+        return (False, "imminent")   # booked on the spot: they're handling it live
     if invite_exists is None:
         return (False, "calendar_unknown")
     if invite_exists:
@@ -177,26 +183,59 @@ def may_click(user_id: str, offer: dict, *, admins: set) -> bool:
 
 
 def _company_core(company: str) -> str:
-    words = [w for w in re.findall(r"[a-z0-9&]+", (company or "").lower()) if w not in _GENERIC]
-    return words[0] if words and len(words[0]) >= 3 else ""
+    words = [w for w in re.findall(r"[a-z0-9&]+", (company or "").lower())
+             if w not in _GENERIC and len(w) >= 3]
+    return words[0] if words else ""
 
 
-def invite_exists_in(events, prospect_email: str, company: str) -> bool:
-    """True if any non-cancelled event has the prospect as a guest or names the
-    company in its title."""
+def _last_name(name: str) -> str:
+    parts = re.findall(r"[a-z'-]+", (name or "").lower())
+    return parts[-1] if len(parts) >= 2 and len(parts[-1]) >= 3 else ""
+
+
+def invite_exists_in(events, prospect_email: str, company: str, prospect_name: str = "") -> bool:
+    """True if any non-cancelled event already covers this prospect:
+    (1) prospect email is a guest; (2) prospect last name in the title or a guest's
+    display name (ITC-app/grip invites carry no prospect email); (3) company core
+    word in the title, UNLESS that event's guests include a different person at the
+    prospect's domain (a second contact at the same company is a separate meeting)."""
     assert isinstance(events, list), "events must be a list"
     assert isinstance(prospect_email, str), "prospect_email must be str"
     email = prospect_email.strip().lower()
-    core = _company_core(company)
+    dom = email.split("@", 1)[1] if "@" in email else ""
+    core, last = _company_core(company), _last_name(prospect_name)
     for ev in events[:MAX_EVENTS]:   # bounded
         if ev.get("status") == "cancelled":
             continue
-        guests = {(a.get("email") or "").lower() for a in (ev.get("attendees") or [])}
+        att = ev.get("attendees") or []
+        guests = {(a.get("email") or "").lower() for a in att}
         if email and email in guests:
             return True
-        if core and re.search(rf"\b{re.escape(core)}\b", (ev.get("summary") or "").lower()):
+        title = (ev.get("summary") or "").lower()
+        names = " ".join((a.get("displayName") or "").lower() for a in att)
+        if last and re.search(rf"\b{re.escape(last)}\b", f"{title} {names}"):
+            return True
+        # name only in the guest's address: bseiter@, jen.jennings@, keishasmith@
+        if last and any(last in g.split("@", 1)[0] for g in guests
+                        if g and not g.endswith("@" + DOMAIN) and "gripcontact" not in g):
+            return True
+        other_contact = dom and any(g.endswith("@" + dom) and g != email for g in guests)
+        if core and not other_contact and re.search(rf"\b{re.escape(core)}\b", title):
             return True
     return False
+
+
+def team_calendars(organizer: str, ae_email: str, roster) -> list:
+    """Internal calendars to scan: organizer and AE first, then the whole AE/BDR
+    roster (invites are often sent by a teammate, not the poster)."""
+    assert isinstance(roster, (list, tuple, set)), "roster must be a collection"
+    out = []
+    for c in [organizer, ae_email, *list(roster)[:60]]:   # bounded
+        c = (c or "").strip().lower()
+        if c.endswith("@" + DOMAIN) and c not in out:
+            out.append(c)
+    assert len(out) == len(set(out)), "deduped"
+    return out
 
 
 def preview_blocks(offer: dict) -> list:
@@ -221,18 +260,17 @@ def preview_blocks(offer: dict) -> list:
                  "text": {"type": "plain_text", "text": "Skip"}, "value": raw}]}]
 
 
-def send_invite(offer: dict, *, fetch_events: Callable, insert_event: Callable) -> dict:
-    """Re-check the organizer's calendar, then create. Idempotent: a second call
-    (double click, retry) finds the first event and does nothing."""
+def send_invite(offer: dict, *, check_exists: Callable, insert_event: Callable) -> dict:
+    """Re-run the team-wide check, then create. Idempotent: a second call (double
+    click, retry, teammate sent it meanwhile) finds the event and does nothing.
+    An unknown check result never sends."""
     assert isinstance(offer, dict), "offer must be a dict"
-    assert callable(fetch_events) and callable(insert_event), "I/O fns required"
-    start = _parse_utc(offer["start_utc"])
-    lo, hi = _iso_z(start - timedelta(days=1)), _iso_z(start + timedelta(days=1))
+    assert callable(check_exists) and callable(insert_event), "I/O fns required"
     try:
-        evs = fetch_events(offer["organizer"], lo, hi)
-        if evs is None:
-            return {"status": "error", "detail": "calendar read failed"}
-        if invite_exists_in(evs, offer["prospect_email"], offer.get("company") or ""):
+        exists = check_exists(offer)
+        if exists is None:
+            return {"status": "error", "detail": "couldn't read the team calendars"}
+        if exists:
             return {"status": "already_exists"}
         body = build_event(offer)
         created = insert_event(offer["organizer"], body, "conferenceData" in body)
@@ -244,27 +282,61 @@ def send_invite(offer: dict, *, fetch_events: Callable, insert_event: Callable) 
 
 
 # ── I/O (Google Calendar via vp_escalation's DWD token; Apollo) ──────────────
+_TOKENS = {}          # subject -> (token, minted_at); DWD tokens live 60 min
+_TOKEN_TTL_S = 45 * 60
+
+
+def _token(subject: str) -> Optional[str]:
+    """Cached delegated token: a team-wide check reads ~30 calendars."""
+    assert subject and "@" in subject, "subject required"
+    hit = _TOKENS.get(subject)
+    if hit and time.time() - hit[1] < _TOKEN_TTL_S:
+        return hit[0]
+    tok = vp._gcal_token(subject=subject)
+    if tok:
+        _TOKENS[subject] = (tok, time.time())
+    assert tok is None or isinstance(tok, str), "token must be str"
+    return tok
+
+
 def gcal_fetch_events(calendar_email: str, time_min: str, time_max: str) -> Optional[list]:
-    """Events on `calendar_email` in [time_min, time_max]. None on failure."""
+    """Events on `calendar_email` in [time_min, time_max]. None = permanent miss
+    (not a Workspace user / 4xx). Raises on transient failure (network, 5xx)."""
     assert calendar_email and time_min and time_max, "args required"
     assert calendar_email.endswith("@" + DOMAIN), "only internal calendars"
-    token = vp._gcal_token(subject=calendar_email)
+    try:
+        token = _token(calendar_email)
+    except Exception as e:
+        if "invalid_grant" in str(e):
+            return None   # permanent: not a real Workspace user (alias, departed)
+        raise             # transient: caller treats as unknown
     if not token:
         return None
-    r = requests.get(f"{vp._CAL_API}/calendars/primary/events", timeout=15,
-                     headers={"Authorization": f"Bearer {token}"},
-                     params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
-                             "maxResults": MAX_EVENTS, "showDeleted": "false"})
+    r = None
+    for attempt in range(2):   # one retry: googleapis reads occasionally time out
+        try:
+            r = requests.get(f"{vp._CAL_API}/calendars/primary/events", timeout=15,
+                             headers={"Authorization": f"Bearer {token}"},
+                             params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
+                                     "maxResults": MAX_EVENTS, "showDeleted": "false"})
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 1:
+                raise
+            continue
+        if r.status_code < 500:
+            break
+    if r.status_code >= 500:
+        raise RuntimeError(f"events.list {calendar_email} -> {r.status_code}")
     if r.status_code != 200:
         print(f"[invite] events.list {calendar_email} -> {r.status_code}", flush=True)
-        return None
+        return None   # 4xx: permanent (no calendar / no access)
     return r.json().get("items", [])
 
 
 def gcal_insert_event(organizer: str, body: dict, needs_conference: bool) -> Optional[dict]:
     assert organizer.endswith("@" + DOMAIN), "organizer must be internal"
     assert isinstance(body, dict) and body.get("attendees"), "body with guests required"
-    token = vp._gcal_token(subject=organizer)
+    token = _token(organizer)
     if not token:
         return None
     params = {"sendUpdates": "all"}
@@ -278,21 +350,66 @@ def gcal_insert_event(organizer: str, body: dict, needs_conference: bool) -> Opt
     return r.json()
 
 
-def invite_exists(calendars, prospect_email: str, company: str, start_utc: str) -> Optional[bool]:
-    """Check each internal calendar (organizer, AE) within +/-1 day. None if any
-    read failed (caller treats unknown as 'don't offer')."""
+def team_roster_from_hubspot(*, api_key: str, http_get: Callable = None) -> list:
+    """Every active @furtherai.com HubSpot owner (AEs, BDRs, execs like Zac/Aman,
+    EU reps): any of them may have sent the invite. Placeholders excluded."""
+    assert api_key, "api_key required"
+    http_get = http_get or requests.get
+    assert callable(http_get), "http_get must be callable"
+    out, after = [], None
+    for _ in range(20):   # <= 2000 owners, hard cap
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+        r = http_get("https://api.hubapi.com/crm/v3/owners", headers={"Authorization": f"Bearer {api_key}"},
+                     params=params, timeout=30)
+        if not (r is not None and getattr(r, "ok", False)):
+            break
+        j = r.json()
+        for o in j.get("results", []):
+            em = (o.get("email") or "").strip().lower()
+            if (em.endswith("@" + DOMAIN) and not o.get("archived") and em not in out
+                    and not any(w in em for w in ("unassigned", "disqualif", "queue"))):
+                out.append(em)
+        after = j.get("paging", {}).get("next", {}).get("after")
+        if not after:
+            break
+    return out[:60]
+
+
+def invite_exists(calendars, prospect_email: str, company: str, start_utc: str,
+                  prospect_name: str = "", required: int = 2) -> Optional[bool]:
+    """Scan each internal calendar within +/-WINDOW_DAYS. The first `required`
+    calendars (organizer, AE) must be readable or the answer is None (callers treat
+    unknown as 'don't offer' / 'don't send'); the rest of the roster is best-effort."""
     assert start_utc, "start_utc required"
     assert isinstance(prospect_email, str), "prospect_email must be str"
     start = _parse_utc(start_utc)
-    lo, hi = _iso_z(start - timedelta(days=1)), _iso_z(start + timedelta(days=1))
-    for cal in [c for c in dict.fromkeys(calendars) if c and c.endswith("@" + DOMAIN)][:4]:
-        try:
-            evs = gcal_fetch_events(cal, lo, hi)
-        except Exception:
-            evs = None
+    lo = _iso_z(start - timedelta(days=WINDOW_DAYS))
+    hi = _iso_z(start + timedelta(days=WINDOW_DAYS))
+    cals = [c for c in dict.fromkeys(calendars) if c and c.endswith("@" + DOMAIN)][:60]
+
+    def read(cal):
+        err = None
+        for _ in range(2):   # one retry per calendar for transient blips
+            try:
+                return gcal_fetch_events(cal, lo, hi), None
+            except Exception as e:
+                err = e
+        return None, err
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:   # bounded parallel reads
+        results = list(pool.map(read, cals))
+    for i, (cal, (evs, err)) in enumerate(zip(cals, results)):
+        if err is not None:
+            print(f"[invite] calendar read failed {cal}: {type(err).__name__}", flush=True)
+            return None   # transient: can't rule out a teammate's invite
         if evs is None:
-            return None
-        if invite_exists_in(evs, prospect_email, company):
+            if i < required:
+                return None
+            continue      # permanent: this user has no calendar to check
+        if invite_exists_in(evs, prospect_email, company, prospect_name):
             return True
     return False
 

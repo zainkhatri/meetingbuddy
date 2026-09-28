@@ -145,20 +145,61 @@ def test_pt_formatting_handles_dst():
 
 
 # ── invite_exists_in (pure matcher over fetched events) ──────────────────────
+def _ex(evs, email="tunsworth@hanover.com", company="The Hanover Insurance Group", name="Tanya Unsworth"):
+    return io.invite_exists_in(evs, email, company, name)
+
+
 def test_existing_event_matched_by_attendee_email():
-    evs = [{"summary": "Coffee", "attendees": [{"email": "TUnsworth@hanover.com"}]}]
-    assert io.invite_exists_in(evs, "tunsworth@hanover.com", "The Hanover Insurance Group") is True
+    assert _ex([{"summary": "Coffee", "attendees": [{"email": "TUnsworth@hanover.com"}]}]) is True
 
 
-def test_existing_event_matched_by_company_in_title():
-    evs = [{"summary": "FurtherAI + Hanover (ITC)", "attendees": []}]
-    assert io.invite_exists_in(evs, "tunsworth@hanover.com", "The Hanover Insurance Group") is True
+def test_placeholder_with_company_in_title_counts():
+    # teammate's placeholder, no guests (the ePremium pattern)
+    assert _ex([{"summary": "ITC chat - FurtherAI // Hanover", "attendees": [{"email": "ben@furtherai.com"}]}]) is True
 
 
-def test_unrelated_event_not_matched():
+def test_itc_app_invite_matched_by_prospect_name():
+    # grip invites carry no prospect email, just the name in the title
+    ev = {"summary": "Meeting with Tanya Unsworth (THG) at 1619",
+          "attendees": [{"email": "calendar+1@mg.gripcontact.com"}]}
+    assert _ex([ev]) is True
+
+
+def test_name_in_guest_display_name_counts():
+    ev = {"summary": "ITC", "attendees": [{"email": "t@gmail.com", "displayName": "Tanya Unsworth"}]}
+    assert _ex([ev]) is True
+
+
+def test_other_contact_same_company_does_not_block():
+    # 3 Cincinnati contacts: Yuchen's invite must not suppress Bob's offer
+    ev = {"summary": "FurtherAI + Cincinnati (ITC)", "attendees": [{"email": "yuchen_wang@cinfin.com"}]}
+    assert io.invite_exists_in([ev], "robert_weishaar@cinfin.com", "The Cincinnati Insurance Companies",
+                               "Bob Weishaar") is False
+
+
+def test_unrelated_and_cancelled_not_matched():
     evs = [{"summary": "Lunch", "attendees": [{"email": "a@b.com"}]},
            {"summary": "FurtherAI + Hanover", "status": "cancelled", "attendees": []}]
-    assert io.invite_exists_in(evs, "tunsworth@hanover.com", "The Hanover Insurance Group") is False
+    assert _ex(evs) is False
+
+
+def test_short_last_name_ignored():
+    # 'Li' would match everything; name rule needs >= 3 chars
+    ev = {"summary": "Lisbon offsite", "attendees": []}
+    assert io.invite_exists_in([ev], "joey@x.com", "Zzq Corp", "Joey Li") is False
+
+
+def test_decide_skips_imminent_meeting():
+    # on-the-spot booking starting in 20 min: they already have it handled
+    assert io.decide_offer(_offer(start_utc="2026-09-28T20:20:00Z"), invite_exists=False, now=NOW) == (False, "imminent")
+
+
+def test_team_calendars_dedup_and_internal_only():
+    cals = io.team_calendars("Zain@furtherai.com", "nick@furtherai.com",
+                             ["nick@furtherai.com", "fabio@furtherai.com", "x@gmail.com", ""])
+    assert cals[:2] == ["zain@furtherai.com", "nick@furtherai.com"]
+    assert "fabio@furtherai.com" in cals and "x@gmail.com" not in cals
+    assert len(cals) == len(set(cals))
 
 
 # ── send: double click creates one event ─────────────────────────────────────
@@ -166,25 +207,31 @@ def test_send_twice_creates_one_event():
     created = []
     state = {"events": []}
 
-    def fetch(_org, _lo, _hi):
-        return list(state["events"])
+    def check(_offer):
+        return io.invite_exists_in(state["events"], _offer["prospect_email"], _offer["company"],
+                                   _offer["prospect_name"])
 
     def insert(_org, body, _conf):
         created.append(body)
         state["events"].append({"summary": body["summary"], "attendees": body["attendees"]})
         return {"id": f"e{len(created)}", "htmlLink": "https://cal/e"}
 
-    first = io.send_invite(_offer(), fetch_events=fetch, insert_event=insert)
-    second = io.send_invite(_offer(), fetch_events=fetch, insert_event=insert)
+    first = io.send_invite(_offer(), check_exists=check, insert_event=insert)
+    second = io.send_invite(_offer(), check_exists=check, insert_event=insert)
     assert first["status"] == "sent"
     assert second["status"] == "already_exists"
     assert len(created) == 1
 
 
 def test_send_reports_calendar_failure():
-    def fetch(*_a):
+    def check(*_a):
         raise RuntimeError("boom")
-    out = io.send_invite(_offer(), fetch_events=fetch, insert_event=lambda *a: None)
+    out = io.send_invite(_offer(), check_exists=check, insert_event=lambda *a: None)
+    assert out["status"] == "error"
+
+
+def test_send_refuses_when_team_check_unknown():
+    out = io.send_invite(_offer(), check_exists=lambda _o: None, insert_event=lambda *a: {"id": "x"})
     assert out["status"] == "error"
 
 
@@ -229,3 +276,135 @@ def test_demo_booking_has_no_conf_tag_or_location():
                               poster_slack="U1", ae_email="", ae_name="", is_conference=False,
                               duration_min=30, conf_label="")
     assert o["conf_short"] == "" and o["location"] == "" and o["is_conference"] is False
+
+
+def test_roster_read_failure_is_best_effort(monkeypatch):
+    calls = []
+
+    def fetch(cal, lo, hi):
+        calls.append(cal)
+        if cal == "gone@furtherai.com":
+            return None   # permanent: user/calendar doesn't exist
+        return [{"summary": "Meeting with Tanya Unsworth", "attendees": []}] if cal == "fabio@furtherai.com" else []
+    monkeypatch.setattr(io, "gcal_fetch_events", fetch)
+    cals = ["zain@furtherai.com", "nick@furtherai.com", "gone@furtherai.com", "fabio@furtherai.com"]
+    assert io.invite_exists(cals, "tunsworth@hanover.com", "Hanover", "2026-09-30T19:00:00Z",
+                            "Tanya Unsworth", required=2) is True
+    assert "fabio@furtherai.com" in calls
+
+
+def test_required_calendar_failure_is_unknown(monkeypatch):
+    monkeypatch.setattr(io, "gcal_fetch_events", lambda *a: None)
+    assert io.invite_exists(["zain@furtherai.com"], "t@h.com", "H", "2026-09-30T19:00:00Z",
+                            required=1) is None
+
+
+# ── regressions from the real ITC replay (2026-09-28) ────────────────────────
+def test_last_name_in_guest_email_local_part():
+    # "Bryan / Fabio - ITC Booth 1619" with bseiter@acuity.com (sheet had no email)
+    ev = {"summary": "Bryan / Fabio - ITC Booth 1619", "attendees": [{"email": "bseiter@acuity.com"}]}
+    assert io.invite_exists_in([ev], "", "Acuity Insurance", "Bryan Seiter") is True
+    ev2 = {"summary": "RGA x FurtherAI", "attendees": [{"email": "jen.jennings@rgare.com"}]}
+    assert io.invite_exists_in([ev2], "", "Reinsurance Group of America", "Jennifer Jenning") is True
+
+
+def test_company_core_skips_short_leading_words():
+    assert io._company_core("JS Johnson") == "johnson"
+    assert io._company_core("A-Max Insurance") == "max"
+
+
+def test_internal_guest_email_never_name_matches():
+    # a teammate named Smith must not count as the prospect
+    ev = {"summary": "Standup", "attendees": [{"email": "jsmith@furtherai.com"}]}
+    assert io.invite_exists_in([ev], "", "Zzq", "Keisha Smith") is False
+
+
+def test_fetch_retries_once_on_timeout(monkeypatch):
+    import requests as rq
+    n = {"calls": 0}
+
+    class R:
+        status_code = 200
+        def json(self): return {"items": [{"summary": "x"}]}
+
+    def get(*a, **k):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            raise rq.Timeout("slow")
+        return R()
+    monkeypatch.setattr(io.vp, "_gcal_token", lambda subject=None: "tok")
+    io._TOKENS.clear()
+    monkeypatch.setattr(io.requests, "get", get)
+    assert io.gcal_fetch_events("zain@furtherai.com", "a", "b") == [{"summary": "x"}]
+    assert n["calls"] == 2
+
+
+def test_roster_is_every_internal_hubspot_owner():
+    class R:
+        ok = True
+        def __init__(self, j): self._j = j
+        def json(self): return self._j
+    pages = [{"results": [{"id": "1", "email": "Zac@furtherai.com"},
+                          {"id": "2", "email": "unassigned@furtherai.com"},
+                          {"id": "3", "email": "vendor@gmail.com"},
+                          {"id": "4", "email": "nick@furtherai.com", "archived": True}],
+              "paging": {"next": {"after": "x"}}},
+             {"results": [{"id": "5", "email": "livvie@furtherai.com"}]}]
+    calls = []
+
+    def get(url, headers=None, params=None, timeout=None):
+        calls.append(params)
+        return R(pages[len(calls) - 1])
+    out = io.team_roster_from_hubspot(api_key="k", http_get=get)
+    assert out == ["zac@furtherai.com", "livvie@furtherai.com"]
+    assert len(calls) == 2
+
+
+def test_transient_roster_failure_is_unknown(monkeypatch):
+    def fetch(cal, lo, hi):
+        if cal == "jacob@furtherai.com":
+            raise RuntimeError("TransportError")   # blip: could hide a teammate's invite
+        return []
+    monkeypatch.setattr(io, "gcal_fetch_events", fetch)
+    cals = ["zain@furtherai.com", "nick@furtherai.com", "jacob@furtherai.com"]
+    assert io.invite_exists(cals, "t@h.com", "H", "2026-09-30T19:00:00Z", required=2) is None
+
+
+def test_fetch_permanent_vs_transient(monkeypatch):
+    import requests as rq
+
+    class R:
+        def __init__(self, c): self.status_code, self.text = c, ""
+        def json(self): return {}
+    monkeypatch.setattr(io.vp, "_gcal_token", lambda subject=None: "tok")
+    io._TOKENS.clear()
+    monkeypatch.setattr(io.requests, "get", lambda *a, **k: R(404))
+    assert io.gcal_fetch_events("gone@furtherai.com", "a", "b") is None
+    monkeypatch.setattr(io.requests, "get", lambda *a, **k: R(503))
+    try:
+        io.gcal_fetch_events("zain@furtherai.com", "a", "b")
+        assert False, "5xx must raise"
+    except RuntimeError:
+        pass
+
+
+def test_invalid_grant_token_is_permanent(monkeypatch):
+    def tok(subject=None):
+        raise Exception("('invalid_grant: Invalid email or User ID', {})")
+    monkeypatch.setattr(io.vp, "_gcal_token", tok)
+    io._TOKENS.clear()
+    assert io.gcal_fetch_events("dani@furtherai.com", "a", "b") is None
+
+
+def test_token_cached_per_user(monkeypatch):
+    n = {"mint": 0}
+
+    def tok(subject=None):
+        n["mint"] += 1
+        return f"t-{subject}"
+    monkeypatch.setattr(io.vp, "_gcal_token", tok)
+    io._TOKENS.clear()
+    assert io._token("a@furtherai.com") == "t-a@furtherai.com"
+    assert io._token("a@furtherai.com") == "t-a@furtherai.com"
+    assert io._token("b@furtherai.com") == "t-b@furtherai.com"
+    assert n["mint"] == 2

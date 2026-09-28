@@ -1678,12 +1678,52 @@ def _thread_has_mark(client, channel, thread_ts, mark):
         return False
 
 
-def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min):
-    """If this booking isn't on the poster's/AE's calendar yet, reply in-thread with
-    a Send/Skip invite preview. Gated by AUTO_INVITE. Never breaks booking."""
+_ROSTER_CACHE = {'at': 0.0, 'emails': []}
+
+
+def _invite_roster():
+    """Every internal HubSpot owner's calendar (AEs, BDRs, Zac/Aman, EU reps):
+    on-the-spot invites are often sent by a teammate. Cached for an hour."""
+    if time.time() - _ROSTER_CACHE['at'] > 3600 or not _ROSTER_CACHE['emails']:
+        try:
+            _ROSTER_CACHE['emails'] = invite_offer.team_roster_from_hubspot(api_key=HS_API_KEY)
+            _ROSTER_CACHE['at'] = time.time()
+        except Exception as e:
+            print(f'[invite] roster fetch failed: {e}', flush=True)
+    return list(_ROSTER_CACHE['emails'])
+
+
+def _invite_check(offer):
+    cals = invite_offer.team_calendars(offer['organizer'], offer.get('ae_email'), _invite_roster())
+    return invite_offer.invite_exists(cals, offer['prospect_email'], offer['company'],
+                                      offer['start_utc'], offer.get('prospect_name') or '',
+                                      required=2 if offer.get('ae_email') else 1)
+
+
+def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min,
+                        synced_url=None):
+    """Schedule the invite offer. A HubSpot meeting that came from calendar sync
+    (has a GCal external url) means someone already sent the invite: never offer.
+    Otherwise wait INVITE_OFFER_DELAY_S (reps often send the invite right after
+    posting) and check the whole team's calendars before posting the preview."""
+    if not invite_offer.enabled() or channel not in CHANNEL_PROFILE or not (ts and poster):
+        return
+    if synced_url:
+        print(f'[invite] ts={ts} offer=False reason=calendar_synced_meeting', flush=True)
+        return
+    args = (dict(parsed), co, contact, owner_id, poster, channel, ts, duration_min)
+    delay = float(os.environ.get('INVITE_OFFER_DELAY_S', '180'))
+    if delay <= 0:
+        _offer_invite_now(*args)
+        return
+    t = threading.Timer(delay, _offer_invite_now, args=args)
+    t.daemon = True
+    t.start()
+
+
+def _offer_invite_now(parsed, co, contact, owner_id, poster, channel, ts, duration_min):
+    """Post the Send/Skip preview if no teammate has the meeting on a calendar."""
     try:
-        if not invite_offer.enabled() or channel not in CHANNEL_PROFILE or not (ts and poster):
-            return
         if _thread_has_mark(app.client, channel, ts, _INVITE_MARK):
             return  # already offered on this thread (replay/sweep safe)
         organizer = _owner_email(owner_id) or _slack_email(app.client, poster)
@@ -1702,8 +1742,7 @@ def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, dura
             duration_min=int(duration_min or 30), conf_label=_conf_label(conf) if conf else '')
         exists = None
         if offer['start_utc'] and offer['prospect_email'] and offer['organizer']:
-            exists = invite_offer.invite_exists([offer['organizer'], ae_email], offer['prospect_email'],
-                                                offer['company'], offer['start_utc'])
+            exists = _invite_check(offer)
         ok, reason = invite_offer.decide_offer(offer, invite_exists=exists, now=datetime.now(timezone.utc))
         print(f'[invite] ts={ts} offer={ok} reason={reason} company={offer["company"]!r}', flush=True)
         if not ok:
@@ -1733,8 +1772,10 @@ def handle_invite_send(ack, body, client, action):
         client.chat_postEphemeral(channel=ch, user=uid,
                                   text="Only the person who booked this can send the invite.")
         return
+    client.chat_postEphemeral(channel=ch, user=uid,
+                              text="Checking the team's calendars so we don't double-book…")
     with _invite_lock(msg_ts or offer['start_utc'] + offer['prospect_email']):
-        out = invite_offer.send_invite(offer, fetch_events=invite_offer.gcal_fetch_events,
+        out = invite_offer.send_invite(offer, check_exists=_invite_check,
                                        insert_event=invite_offer.gcal_insert_event)
         title = invite_offer.event_title(offer)
         if out['status'] == 'sent':
@@ -1743,7 +1784,8 @@ def handle_invite_send(ack, body, client, action):
             text = (f"✓ Invite sent by <@{uid}>: *{title}*, {invite_offer.fmt_pt(offer['start_utc'])}. "
                     f"Guests: {who}{ae}.")
         elif out['status'] == 'already_exists':
-            text = f"✓ *{title}* is already on the calendar, so nothing was sent."
+            text = (f"✓ *{title}* is already on a teammate's calendar, so nothing was sent "
+                    f"(no double-booking).")
         else:
             print(f"[invite] send failed: {out.get('detail')}", flush=True)
             client.chat_postEphemeral(channel=ch, user=uid,
@@ -1983,7 +2025,8 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
         _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster, owner_id=owner_id, channel=channel)
-        _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min)
+        _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min,
+                            synced_url=existing.get('external_url'))
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no

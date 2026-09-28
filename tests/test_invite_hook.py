@@ -25,18 +25,20 @@ PARSED = {'contact_first_name': 'Tanya', 'contact_last_name': 'Unsworth',
 CO = {'id': '1', 'properties': {'hubspot_owner_id': '165453251'}}
 
 
-def _run(monkeypatch, *, enabled=True, exists=False, replies=None):
+def _run(monkeypatch, *, enabled=True, exists=False, replies=None, synced_url=None):
     c = _Client(replies)
     monkeypatch.setattr(mb.app, '_client', c, raising=False)
     monkeypatch.setattr(type(mb.app), 'client', property(lambda self: c))
     monkeypatch.setenv('AUTO_INVITE', '1' if enabled else '0')
+    monkeypatch.setenv('INVITE_OFFER_DELAY_S', '0')
+    monkeypatch.setattr(mb, '_invite_roster', lambda: ['fabio@furtherai.com'])
     monkeypatch.setattr(mb, '_owner_email', lambda oid: {'88760040': 'zain@furtherai.com',
                                                         '165453251': 'nick@furtherai.com'}.get(oid))
     monkeypatch.setattr(mb, '_owner_name', lambda oid: 'Nick Margay')
     monkeypatch.setattr(mb, '_conf_label', lambda v: 'ITC Vegas 2026')
     monkeypatch.setattr(invite_offer, 'invite_exists', lambda *a, **k: exists)
     mb._maybe_offer_invite(dict(PARSED), CO, None, '88760040', 'U_ZAIN',
-                           mb.CONFERENCE_MEETINGS_CHANNEL, '123.456', 15)
+                           mb.CONFERENCE_MEETINGS_CHANNEL, '123.456', 15, synced_url=synced_url)
     return c
 
 
@@ -67,3 +69,22 @@ def test_silent_when_already_offered(monkeypatch):
 def test_handlers_registered():
     src = open(mb.__file__).read()
     assert "@app.action('invite_send')" in src and "@app.action('invite_skip')" in src
+
+
+def test_silent_when_hubspot_meeting_is_calendar_synced(monkeypatch):
+    assert _run(monkeypatch, synced_url='https://www.google.com/calendar/event?eid=abc').posted == []
+
+
+def test_team_check_scans_roster(monkeypatch):
+    seen = {}
+
+    def fake_exists(cals, *a, **k):
+        seen['cals'] = cals
+        return False
+    monkeypatch.setattr(invite_offer, 'invite_exists', fake_exists)
+    offer = {'organizer': 'zain@furtherai.com', 'ae_email': 'nick@furtherai.com',
+             'prospect_email': 'p@x.com', 'company': 'X', 'start_utc': '2099-01-01T00:00:00Z',
+             'prospect_name': 'P Q'}
+    monkeypatch.setattr(mb, '_invite_roster', lambda: ['fabio@furtherai.com', 'nick@furtherai.com'])
+    assert mb._invite_check(offer) is False
+    assert seen['cals'] == ['zain@furtherai.com', 'nick@furtherai.com', 'fabio@furtherai.com']
