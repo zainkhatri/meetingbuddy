@@ -41,6 +41,7 @@ import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
+import invite_offer  # Send/Skip calendar-invite offer on booking posts; inert unless AUTO_INVITE=1
 
 
 # --- Credentials (all from env; fail fast if missing) ---
@@ -1642,6 +1643,135 @@ def _vp_thread_has_nudge(client, channel, thread_ts):
         return False
 
 
+_INVITE_MARK = 'No calendar invite found'
+_INVITE_LOCKS = {}
+_INVITE_LOCKS_GUARD = threading.Lock()
+
+
+def _invite_lock(key):
+    with _INVITE_LOCKS_GUARD:
+        return _INVITE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _slack_email(client, user_id):
+    try:
+        return ((client.users_info(user=user_id).get('user') or {}).get('profile') or {}).get('email') or None
+    except Exception:
+        return None
+
+
+def _real_owner(owner_id):
+    """(email, name) of a real HubSpot owner, or ('','') for missing/placeholder
+    owners like 'Unassigned Territory' / 'Disqualified Queue'."""
+    em = _owner_email(owner_id) or ''
+    if not em or any(w in em for w in ('unassigned', 'disqualif', 'queue')):
+        return ('', '')
+    return (em, _owner_name(owner_id) or em)
+
+
+def _thread_has_mark(client, channel, thread_ts, mark):
+    try:
+        rep = client.conversations_replies(channel=channel, ts=thread_ts, limit=50)
+        return any(mark in (m.get('text') or '') for m in rep.get('messages', []))
+    except Exception as e:
+        print(f'[invite] dedup check failed: {e}', flush=True)
+        return False
+
+
+def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min):
+    """If this booking isn't on the poster's/AE's calendar yet, reply in-thread with
+    a Send/Skip invite preview. Gated by AUTO_INVITE. Never breaks booking."""
+    try:
+        if not invite_offer.enabled() or channel not in CHANNEL_PROFILE or not (ts and poster):
+            return
+        if _thread_has_mark(app.client, channel, ts, _INVITE_MARK):
+            return  # already offered on this thread (replay/sweep safe)
+        organizer = _owner_email(owner_id) or _slack_email(app.client, poster)
+        co_owner = ((co or {}).get('properties') or {}).get('hubspot_owner_id')
+        ae_email, ae_name = _real_owner(co_owner)
+        email = parsed.get('contact_email') or ((contact or {}).get('properties') or {}).get('email')
+        if not email and parsed.get('meeting_time_utc'):
+            email = invite_offer.apollo_email(parsed.get('contact_first_name') or '',
+                                              parsed.get('contact_last_name') or '',
+                                              parsed.get('company_name') or '')
+        is_conf = bool(CHANNEL_PROFILE[channel].get('is_conference'))
+        conf = parsed.get('conference_source') or ''
+        offer = invite_offer.offer_from_booking(
+            dict(parsed, contact_email=email), organizer=organizer or '', poster_slack=poster,
+            ae_email=ae_email, ae_name=ae_name, is_conference=is_conf,
+            duration_min=int(duration_min or 30), conf_label=_conf_label(conf) if conf else '')
+        exists = None
+        if offer['start_utc'] and offer['prospect_email'] and offer['organizer']:
+            exists = invite_offer.invite_exists([offer['organizer'], ae_email], offer['prospect_email'],
+                                                offer['company'], offer['start_utc'])
+        ok, reason = invite_offer.decide_offer(offer, invite_exists=exists, now=datetime.now(timezone.utc))
+        print(f'[invite] ts={ts} offer={ok} reason={reason} company={offer["company"]!r}', flush=True)
+        if not ok:
+            return
+        app.client.chat_postMessage(channel=channel, thread_ts=ts,
+                                    blocks=invite_offer.preview_blocks(offer),
+                                    text=f"{_INVITE_MARK}: {invite_offer.event_title(offer)}")
+    except Exception as e:
+        print(f'[invite] offer skipped (non-fatal): {e}', flush=True)
+
+
+def _invite_done_blocks(text):
+    return [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': text}}]
+
+
+@app.action('invite_send')
+def handle_invite_send(ack, body, client, action):
+    ack()
+    uid = body['user']['id']
+    ch = body['channel']['id']
+    msg_ts = (body.get('message') or {}).get('ts')
+    offer = invite_offer.decode_payload(action.get('value'))
+    if not offer:
+        client.chat_postEphemeral(channel=ch, user=uid, text="That invite button is stale, sorry.")
+        return
+    if not invite_offer.may_click(uid, offer, admins=invite_offer.admins()):
+        client.chat_postEphemeral(channel=ch, user=uid,
+                                  text="Only the person who booked this can send the invite.")
+        return
+    with _invite_lock(msg_ts or offer['start_utc'] + offer['prospect_email']):
+        out = invite_offer.send_invite(offer, fetch_events=invite_offer.gcal_fetch_events,
+                                       insert_event=invite_offer.gcal_insert_event)
+        title = invite_offer.event_title(offer)
+        if out['status'] == 'sent':
+            who = offer['prospect_name'] or offer['prospect_email']
+            ae = f" + {offer['ae_name']}" if offer.get('ae_email') else ''
+            text = (f"✓ Invite sent by <@{uid}>: *{title}*, {invite_offer.fmt_pt(offer['start_utc'])}. "
+                    f"Guests: {who}{ae}.")
+        elif out['status'] == 'already_exists':
+            text = f"✓ *{title}* is already on the calendar, so nothing was sent."
+        else:
+            print(f"[invite] send failed: {out.get('detail')}", flush=True)
+            client.chat_postEphemeral(channel=ch, user=uid,
+                                      text=f"⚠️ Couldn't create the invite ({out.get('detail', 'error')}). "
+                                           f"Try again or send it manually.")
+            return
+        print(f"[invite] {out['status']} {title} by {uid}", flush=True)
+        if msg_ts:
+            client.chat_update(channel=ch, ts=msg_ts, text=f"{_INVITE_MARK} (handled)",
+                               blocks=_invite_done_blocks(text))
+
+
+@app.action('invite_skip')
+def handle_invite_skip(ack, body, client, action):
+    ack()
+    uid = body['user']['id']
+    ch = body['channel']['id']
+    msg_ts = (body.get('message') or {}).get('ts')
+    offer = invite_offer.decode_payload(action.get('value'))
+    if not offer or not invite_offer.may_click(uid, offer, admins=invite_offer.admins()):
+        client.chat_postEphemeral(channel=ch, user=uid,
+                                  text="Only the person who booked this can skip the invite.")
+        return
+    if msg_ts:
+        client.chat_update(channel=ch, ts=msg_ts, text=f"{_INVITE_MARK} (handled)",
+                           blocks=_invite_done_blocks(f"Skipped: no invite sent (<@{uid}>)."))
+
+
 def _maybe_vp_escalate(parsed, meeting_id, date_str, say, ts, poster=None, owner_id=None,
                        channel=None):
     """VP+ ICP escalation: post exactly ONE nudge in the booking thread asking the
@@ -1853,6 +1983,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
             say(text=_note, thread_ts=ts)
         _maybe_unsure_reply(channel, conf, say, ts)
         _maybe_vp_escalate(parsed, existing['id'], date_str, say, ts, poster=poster, owner_id=owner_id, channel=channel)
+        _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min)
         return
 
     # 4. Create meeting — but only with a real time. We reach here only when no
@@ -1965,6 +2096,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
             say(text=note, thread_ts=ts)
         _maybe_unsure_reply(channel, parsed.get('conference_source'), say, ts)
         _maybe_vp_escalate(parsed, mtg['id'], parsed.get('meeting_date'), say, ts, poster=poster, owner_id=owner_id, channel=channel)
+        _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, duration_min)
     else:
         say(text="⚠️ I parsed your message but couldn't create the HubSpot meeting. Check my logs.", thread_ts=ts)
 
