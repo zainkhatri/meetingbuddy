@@ -1646,6 +1646,20 @@ def _vp_thread_has_nudge(client, channel, thread_ts):
 _INVITE_MARK = 'No calendar invite found'
 _INVITE_LOCKS = {}
 _INVITE_LOCKS_GUARD = threading.Lock()
+_INVITE_PENDING = set()   # booking ts with a delayed offer not yet run
+
+
+def _wait_for_pending_invites(max_s=300, poll_s=5):
+    """Hold a planned restart until delayed invite offers have run (bounded), so
+    the 30-min recycle never silently drops an offer. Returns what was left."""
+    assert max_s >= 0 and poll_s > 0, 'bounds must be positive'
+    for _ in range(int(max_s // poll_s)):   # bounded
+        with _INVITE_LOCKS_GUARD:
+            if not _INVITE_PENDING:
+                return 0
+        time.sleep(poll_s)
+    with _INVITE_LOCKS_GUARD:
+        return len(_INVITE_PENDING)
 
 
 def _invite_lock(key):
@@ -1716,7 +1730,16 @@ def _maybe_offer_invite(parsed, co, contact, owner_id, poster, channel, ts, dura
     if delay <= 0:
         _offer_invite_now(*args)
         return
-    t = threading.Timer(delay, _offer_invite_now, args=args)
+    with _INVITE_LOCKS_GUARD:
+        _INVITE_PENDING.add(ts)
+
+    def _run():
+        try:
+            _offer_invite_now(*args)
+        finally:
+            with _INVITE_LOCKS_GUARD:
+                _INVITE_PENDING.discard(ts)
+    t = threading.Timer(delay, _run)
     t.daemon = True
     t.start()
 
@@ -2967,6 +2990,9 @@ def periodic_restart(interval_seconds=1800):
     # observed. Startup replay + booked_at dedup make recycling safe.
     # Uses exit(0) so Railway's ON_FAILURE restart cap isn't burned.
     time.sleep(interval_seconds)
+    left = _wait_for_pending_invites()
+    if left:
+        print(f'[periodic-restart] {left} invite offer(s) still pending after wait', flush=True)
     print(f'[periodic-restart] {interval_seconds}s elapsed — exiting for clean restart')
     os._exit(0)
 

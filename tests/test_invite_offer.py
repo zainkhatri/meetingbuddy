@@ -334,7 +334,7 @@ def test_fetch_retries_once_on_timeout(monkeypatch):
         return R()
     monkeypatch.setattr(io.vp, "_gcal_token", lambda subject=None: "tok")
     io._TOKENS.clear()
-    monkeypatch.setattr(io.requests, "get", get)
+    monkeypatch.setattr(io._HTTP, "get", get)
     assert io.gcal_fetch_events("zain@furtherai.com", "a", "b") == [{"summary": "x"}]
     assert n["calls"] == 2
 
@@ -378,9 +378,9 @@ def test_fetch_permanent_vs_transient(monkeypatch):
         def json(self): return {}
     monkeypatch.setattr(io.vp, "_gcal_token", lambda subject=None: "tok")
     io._TOKENS.clear()
-    monkeypatch.setattr(io.requests, "get", lambda *a, **k: R(404))
+    monkeypatch.setattr(io._HTTP, "get", lambda *a, **k: R(404))
     assert io.gcal_fetch_events("gone@furtherai.com", "a", "b") is None
-    monkeypatch.setattr(io.requests, "get", lambda *a, **k: R(503))
+    monkeypatch.setattr(io._HTTP, "get", lambda *a, **k: R(503))
     try:
         io.gcal_fetch_events("zain@furtherai.com", "a", "b")
         assert False, "5xx must raise"

@@ -282,6 +282,8 @@ def send_invite(offer: dict, *, check_exists: Callable, insert_event: Callable) 
 
 
 # ── I/O (Google Calendar via vp_escalation's DWD token; Apollo) ──────────────
+_HTTP = requests.Session()   # pooled keep-alive: one DNS lookup per host, not per read
+_HTTP.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8))
 _TOKENS = {}          # subject -> (token, minted_at); DWD tokens live 60 min
 _TOKEN_TTL_S = 45 * 60
 
@@ -315,7 +317,7 @@ def gcal_fetch_events(calendar_email: str, time_min: str, time_max: str) -> Opti
     r = None
     for attempt in range(2):   # one retry: googleapis reads occasionally time out
         try:
-            r = requests.get(f"{vp._CAL_API}/calendars/primary/events", timeout=15,
+            r = _HTTP.get(f"{vp._CAL_API}/calendars/primary/events", timeout=15,
                              headers={"Authorization": f"Bearer {token}"},
                              params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
                                      "maxResults": MAX_EVENTS, "showDeleted": "false"})
