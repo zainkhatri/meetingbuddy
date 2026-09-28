@@ -117,3 +117,10 @@ def test_delayed_offer_runs_and_clears_pending(monkeypatch):
     assert '9.9' in mb._INVITE_PENDING
     _t.sleep(0.4)
     assert ran == ['9.9'] and '9.9' not in mb._INVITE_PENDING
+
+
+def test_every_process_booking_caller_passes_poster():
+    import re
+    src = open(mb.__file__).read()
+    calls = [m for m in re.findall(r"_process_booking\(([^\n]*)\)", src) if not m.startswith('parsed, text, owner_id, ts, client, say, channel=None')]
+    assert calls and all('poster=' in c for c in calls), calls
