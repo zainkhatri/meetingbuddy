@@ -224,14 +224,14 @@ PARSE_TOOL = {
 }
 
 
-def parse_with_claude(text, reference_date=None):
+def parse_with_claude(text, reference_date=None, post_ts=None):
+    """post_ts = the Slack post's ts: relative dates ("Wednesday", "tomorrow") are
+    resolved from the day it was POSTED in Pacific time, not from now/UTC."""
     if not client:
         return None
-    ref = reference_date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    prompt = (PARSE_PROMPT
-              + f"\n[Reference date: {ref}. Dates without a year → pick the year that puts "
-                f"the meeting AFTER the reference date. Never default to past years.]\n\n"
-              + text)
+    if post_ts is None and reference_date:      # tests / tools pass a bare date
+        post_ts = datetime.fromisoformat(f'{reference_date}T12:00:00-07:00').timestamp()
+    prompt = PARSE_PROMPT + "\n" + meeting_time.reference_block(post_ts) + "\n\n" + text
     try:
         r = client.messages.create(
             model='claude-haiku-4-5-20251001',
@@ -1372,7 +1372,7 @@ def handle_message(event, client, say, logger):
         return
 
     # Parse — Claude may return a single dict or a list of dicts (multi-booking post)
-    parsed_raw = parse_with_claude(text)
+    parsed_raw = parse_with_claude(text, post_ts=ts)
     # Parse error (API/JSON failure). Only alert on booking-shaped messages —
     # replay re-attempts exactly those (it gates on _looks_like_booking), so the
     # "retry on next restart" promise is only true there. A transient API blip on
@@ -1475,10 +1475,8 @@ def _find_meeting_by_booked_at(thread_ts):
         if r.status_code != 200 or not r.json().get('results'):
             return None
         p = r.json()['results'][0]['properties']
-        meeting_date = None
-        start = p.get('hs_meeting_start_time')
-        if start and str(start).isdigit():
-            meeting_date = datetime.utcfromtimestamp(int(start) / 1000).strftime('%Y-%m-%d')
+        # HubSpot returns an ISO string (the old isdigit() check always failed → None).
+        meeting_date = meeting_time.pt_date(p.get('hs_meeting_start_time'))
         return {'id': r.json()['results'][0]['id'],
                 'conference_source': p.get('conference_source'),
                 'meeting_date': meeting_date}
@@ -2497,7 +2495,7 @@ def replay_missed_messages():
             except Exception as e:
                 print(f'[replay] dedup check failed ts={ts}: {e} — falling through')
             try:
-                parsed_raw = parse_with_claude(text)
+                parsed_raw = parse_with_claude(text, post_ts=ts)
             except Exception:
                 continue
             if not parsed_raw:
@@ -2807,7 +2805,7 @@ def conference_tag_sweep():
             p = m.get('properties') or {}
             conf = detect_conference_from_title(p.get('hs_meeting_title'))
             if not conf and p.get('meeting_sourced_by'):
-                conf = detect_conference_from_date((p.get('hs_meeting_start_time') or '')[:10])
+                conf = detect_conference_from_date(meeting_time.pt_date(p.get('hs_meeting_start_time')))
             if not conf:
                 continue
             rp = requests.patch(f'https://api.hubapi.com/crm/v3/objects/meetings/{m["id"]}',
@@ -2970,7 +2968,7 @@ def live_sweep_loop():
                         continue
                     print(f'[sweep] catching missed booking ts={ts}')
                     try:
-                        parsed_raw = parse_with_claude(text)
+                        parsed_raw = parse_with_claude(text, post_ts=ts)
                     except Exception as e:
                         print(f'[sweep] parse error ts={ts}: {e}')
                         continue
