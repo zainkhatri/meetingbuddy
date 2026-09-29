@@ -41,6 +41,7 @@ import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
+import meeting_time  # booking time as written + zone → correct UTC start
 import invite_offer  # Send/Skip calendar-invite offer on booking posts; inert unless AUTO_INVITE=1
 
 
@@ -202,7 +203,8 @@ _BOOKING_ITEM = {
         'segment':             {'type': ['string', 'null'], 'enum': ['brokerage', 'carrier', 'mga', None]},
         'company_size':        {'type': ['string', 'null'], 'description': 'employee/ee count, e.g. "500" or "10k". Best estimate for well-known companies.'},
         'meeting_date':        {'type': ['string', 'null'], 'description': 'YYYY-MM-DD'},
-        'meeting_time_utc':    {'type': ['string', 'null'], 'description': 'HH:MM in UTC'},
+        'meeting_time_local':  {'type': ['string', 'null'], 'description': 'HH:MM 24h, exactly as written in the post. Do NOT convert time zones.'},
+        'meeting_tz':          {'type': ['string', 'null'], 'description': 'Time zone as written (PST, PT, ET, CST, UTC...); null if none given'},
         'location':            {'type': ['string', 'null']},
         'notes':               {'type': ['string', 'null']},
     },
@@ -240,6 +242,8 @@ def parse_with_claude(text, reference_date=None):
         )
         tool_block = next(b for b in r.content if b.type == 'tool_use')
         bookings = tool_block.input.get('bookings', [])
+        for b in bookings:
+            meeting_time.normalize_booking(b)   # local time + zone → meeting_start_utc / meeting_time_utc
         return bookings if len(bookings) != 1 else bookings[0]
     except Exception as e:
         print(f'Claude parse error: {e}', flush=True)
@@ -627,11 +631,14 @@ def resolve_or_create_conference(raw, meeting_date):
 
 
 def hs_create_meeting(title, date_str, time_str, contact_id, sourced_by, meeting_type, source_channel,
-                     conference_source, notes, owner_id=None, company_id=None, duration_min=30):
+                     conference_source, notes, owner_id=None, company_id=None, duration_min=30,
+                     start_iso=None):
     # Build start time. NEVER stamp "now" — a fabricated time is the timeless
     # junk we're killing. Callers gate on a real date before reaching here; if
     # one slips through with no date, refuse rather than ghost-create.
-    if date_str and time_str:
+    if start_iso:
+        start = datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
+    elif date_str and time_str:
         try:
             start = datetime.fromisoformat(f'{date_str}T{time_str}:00+00:00')
         except Exception:
@@ -1408,13 +1415,16 @@ def handle_message(event, client, say, logger):
 
 
 def _push_to_ellen_sheet(*, conference_slug, owner_id, meeting_date, meeting_time_utc,
-                          existing_start_ms, company_name, first, last, title, email, outcome):
+                          existing_start_ms, company_name, first, last, title, email, outcome,
+                          start_iso=None):
     """Best-effort upsert into Ellen's Full Meeting Tracker. Returns suffix for Slack reply."""
     if not conference_slug or not company_name:
         return ''
     # Compute start time ms: prefer the one already on the existing meeting; else
     # build from parsed date/time the same way hs_create_meeting does.
     start_ms = existing_start_ms
+    if not start_ms and start_iso:
+        start_ms = int(datetime.fromisoformat(start_iso.replace('Z', '+00:00')).timestamp() * 1000)
     if not start_ms and meeting_date:
         try:
             if meeting_time_utc:
@@ -2031,6 +2041,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
             owner_id=owner_id,
             meeting_date=date_str,
             meeting_time_utc=parsed.get('meeting_time_utc'),
+            start_iso=parsed.get('meeting_start_utc'),
             existing_start_ms=existing.get('start_time_ms'),
             company_name=company_name,
             first=first, last=last,
@@ -2089,6 +2100,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         title=mtg_title,
         date_str=parsed.get('meeting_date'),
         time_str=parsed.get('meeting_time_utc'),
+        start_iso=parsed.get('meeting_start_utc'),
         contact_id=contact_id,
         sourced_by=owner_id,
         meeting_type=parsed.get('meeting_type'),
@@ -2129,7 +2141,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
                                   contact_id, owner_id, mtg['id'])
         _run_calendar_credit(company_id, contact_id, email, owner_id,
                              mtg['id'], None,
-                             parsed.get('meeting_time_utc') and f"{parsed.get('meeting_date')}T{parsed.get('meeting_time_utc')}:00Z",
+                             parsed.get('meeting_start_utc') or (parsed.get('meeting_time_utc') and f"{parsed.get('meeting_date')}T{parsed.get('meeting_time_utc')}:00Z"),
                              say, ts)
 
     # 6. Push to Ellen's sheet (best-effort)
@@ -2140,6 +2152,7 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
             owner_id=owner_id,
             meeting_date=parsed.get('meeting_date'),
             meeting_time_utc=parsed.get('meeting_time_utc'),
+            start_iso=parsed.get('meeting_start_utc'),
             existing_start_ms=None,
             company_name=company_name,
             first=first, last=last,

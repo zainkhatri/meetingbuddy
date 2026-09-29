@@ -88,9 +88,13 @@ def offer_from_booking(parsed: dict, *, organizer: str, poster_slack: str, ae_em
     assert isinstance(parsed, dict), "parsed must be a dict"
     assert isinstance(duration_min, int) and duration_min > 0, "duration_min must be > 0"
     date, hhmm = parsed.get("meeting_date") or "", parsed.get("meeting_time_utc") or ""
-    start = f"{date}T{hhmm}:00Z" if date and re.fullmatch(r"\d{1,2}:\d{2}", hhmm) else ""
-    if start and len(hhmm) == 4:
-        start = f"{date}T0{hhmm}:00Z"
+    # meeting_start_utc is zone-correct (meeting_time.normalize_booking); gluing the
+    # LOCAL date to a UTC time put evening-Pacific meetings a day early.
+    start = parsed.get("meeting_start_utc") or ""
+    if not start:
+        start = f"{date}T{hhmm}:00Z" if date and re.fullmatch(r"\d{1,2}:\d{2}", hhmm) else ""
+        if start and len(hhmm) == 4:
+            start = f"{date}T0{hhmm}:00Z"
     name = " ".join(x for x in (parsed.get("contact_first_name"), parsed.get("contact_last_name")) if x)
     conf = parsed.get("conference_source") or ""
     return {"organizer": (organizer or "").strip().lower(), "poster_slack": poster_slack or "",
