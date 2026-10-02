@@ -34,9 +34,13 @@ def _digest(n_open, claimed=()):     # claimed = list of (cid, sdr)
     return blocks
 
 def test_claim_cap_even_split():
-    assert m.claim_cap(15) == 3 and m.claim_cap(10) == 2 and m.claim_cap(3) == 1
-    assert m.claim_cap(12) == 3            # ceil(12/5)
+    assert m.claim_cap(15, 5) == 3 and m.claim_cap(10, 5) == 2 and m.claim_cap(3, 5) == 1
+    assert m.claim_cap(12, 5) == 3         # ceil(12/5)
     assert m.claim_cap(0) == 0
+    assert m.claim_cap(12) == 4            # live split: Jacob/Ben/Matt -> ceil(12/3)
+
+def test_departed_bdrs_cannot_claim():
+    assert sorted(m.SDR_SLACK.values()) == ['Ben', 'Jacob', 'Matt'] and m.NBDRS == 3
 
 def test_count_company_rows_counts_open_and_claimed():
     blocks = _digest(13, claimed=[(100, 'Zain'), (101, 'Zain')])   # 15 total, header ignored
@@ -44,15 +48,15 @@ def test_count_company_rows_counts_open_and_claimed():
 
 def test_cap_ok_blocks_at_limit():
     # 15-row digest -> cap 3. Zain already has 2 -> ok; give a 3rd -> not ok.
-    ok, cap, used = m.cap_ok(_digest(13, [(100, 'Zain'), (101, 'Zain')]), 'Zain')
+    ok, cap, used = m.cap_ok(_digest(13, [(100, 'Zain'), (101, 'Zain')]), 'Zain', 5)
     assert ok is True and cap == 3 and used == 2
-    ok2, cap2, used2 = m.cap_ok(_digest(12, [(100, 'Zain'), (101, 'Zain'), (102, 'Zain')]), 'Zain')
+    ok2, cap2, used2 = m.cap_ok(_digest(12, [(100, 'Zain'), (101, 'Zain'), (102, 'Zain')]), 'Zain', 5)
     assert ok2 is False and cap2 == 3 and used2 == 3
 
 def test_cap_is_per_bdr():
     blocks = _digest(12, [(100, 'Zain'), (101, 'Zain'), (102, 'Zain')])   # Zain maxed at 3
-    assert m.cap_ok(blocks, 'Zain')[0] is False
-    assert m.cap_ok(blocks, 'Ben')[0] is True                 # Ben still has 0
+    assert m.cap_ok(blocks, 'Zain', 5)[0] is False
+    assert m.cap_ok(blocks, 'Ben', 5)[0] is True              # Ben still has 0
 
 def test_mark_claimed_rewrites_row_and_drops_button():
     blocks = _digest(3)                                       # cids 0,1,2 with buttons

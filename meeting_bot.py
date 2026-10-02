@@ -1261,7 +1261,7 @@ def handle_claim_account(ack, body, client, action):
         client.chat_postEphemeral(channel=ch, user=uid,
                                   text="Only BDRs can claim these — this is BDR account recycling.")
         return
-    # even-split cap: each BDR may claim ceil(digest_size / 5) per rolling week. Cap value comes
+    # even-split cap: each BDR may claim ceil(digest_size / NBDRS) per rolling week. Cap value comes
     # from the digest they're viewing; used-count is tracked in-process under a per-BDR lock
     # (seeded once from HubSpot) so rapid clicks can't race the search index.
     msg  = body.get('message', {})

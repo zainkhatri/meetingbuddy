@@ -3,17 +3,16 @@
 import math
 from datetime import datetime, timezone
 
-NBDRS = 5                      # even-split cap: each BDR may claim ceil(digest_size / NBDRS)
 CLAIMED_MARK = '✅ Claimed by '
 
-# Slack user id -> SDR first name (the 5 valid sdr_owner enum values). Looked up 2026-09-16.
+# Slack user id -> SDR first name (the visible sdr_owner enum values). Zain and Dani
+# left the BDR team 2026-10-01 (their enum options are archived), so they can't claim.
 SDR_SLACK = {
-    'U0AGP9NCBA5': 'Zain',
     'U0ADR5W8Q10': 'Jacob',    # Jacob Sanders
-    'U099VBSUFPD': 'Dani',     # Daniella Salgado
     'U0B5J4MDC4T': 'Ben',      # Ben Trotter
     'U0B2WK6G3R9': 'Matt',     # Matt Stapleton
 }
+NBDRS = len(SDR_SLACK)         # even-split cap: each BDR may claim ceil(digest_size / NBDRS)
 SDR_SLACK_REV = {name: uid for uid, name in SDR_SLACK.items()}
 
 def _claim_iso():
