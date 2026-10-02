@@ -69,7 +69,7 @@ def log_owner_change(deal_id, prior_owner, new_owner, reason, source,
     """Append one ownership-change record (JSONL). Returns the record.
     Never raises on write failure — logs and continues."""
     assert deal_id, 'deal_id required'
-    assert source in ('booking', 'cron'), 'source must be booking|cron'
+    assert source in ('booking', 'cron', 'sweep'), 'source must be booking|cron|sweep'
     ts_fn = ts_fn or time.time
     path = path or _AUDIT_PATH
     rec = {'ts': round(ts_fn(), 3), 'deal_id': str(deal_id),

@@ -41,6 +41,7 @@ import attribution
 from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
+import invite_sweep  # re-reads invites so the AE on the demo owns the deal
 import meeting_time  # booking time as written + zone → correct UTC start
 import invite_offer  # Send/Skip calendar-invite offer on booking posts; inert unless AUTO_INVITE=1
 
@@ -922,6 +923,105 @@ def _run_calendar_credit(company_id, contact_id, prospect_email, booker_owner_id
             say(text=out['text'], thread_ts=ts)
     except Exception as e:
         print(f'[credit] booking-path failed for mtg {meeting_id}: {e}', flush=True)
+
+
+# --- Invite sweep: the durable path for "the AE on the invite owns the deal" ---
+# Re-reads the invites of open demo deals still on Unassigned/a BDR on every boot
+# (the bot restarts every 30 min). See invite_sweep.py.
+INVITE_SWEEP = os.environ.get('INVITE_SWEEP', '1') == '1'
+INVITE_SWEEP_DAYS = int(os.environ.get('INVITE_SWEEP_DAYS', '180'))
+
+
+def _sweep_fetch_deals():
+    """Open Sales-Pipeline deals owned by Unassigned or a BDR, created recently."""
+    since = int((time.time() - INVITE_SWEEP_DAYS * 86400) * 1000)
+    out, after = [], None
+    for _ in range(5):                                   # <=500 deals, bounded
+        body = {'filterGroups': [{'filters': [
+                    {'propertyName': 'pipeline', 'operator': 'EQ', 'value': DEAL_PIPELINE},
+                    {'propertyName': 'dealstage', 'operator': 'IN', 'values': DEAL_OPEN_STAGES},
+                    {'propertyName': 'hubspot_owner_id', 'operator': 'IN',
+                     'values': sorted({UNASSIGNED} | set(calendar_credit.BDR_IDS))},
+                    {'propertyName': 'createdate', 'operator': 'GTE', 'value': str(since)}]}],
+                'properties': ['dealname', 'sourced_by', 'hubspot_owner_id'], 'limit': 100}
+        if after:
+            body['after'] = after
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
+                          headers=HS, json=body, timeout=30)
+        r.raise_for_status()
+        j = r.json()
+        for d in j.get('results', []):
+            p = d.get('properties') or {}
+            out.append({'id': d['id'], 'name': p.get('dealname'),
+                        'sourced_by': p.get('sourced_by')})
+        after = (j.get('paging') or {}).get('next', {}).get('after')
+        if not after:
+            break
+    return out
+
+
+def _hs_assoc_ids(deal_id, obj, cap):
+    r = requests.get(f'https://api.hubapi.com/crm/v4/objects/deals/{deal_id}/associations/{obj}',
+                     headers=HS, params={'limit': 100}, timeout=15)
+    r.raise_for_status()
+    return [str(a['toObjectId']) for a in r.json().get('results', [])][:cap]
+
+
+def _hs_batch_read(obj, ids, props):
+    if not ids:
+        return []
+    r = requests.post(f'https://api.hubapi.com/crm/v3/objects/{obj}/batch/read', headers=HS,
+                      json={'inputs': [{'id': i} for i in ids], 'properties': props}, timeout=30)
+    r.raise_for_status()
+    return [x.get('properties') or {} for x in r.json().get('results', [])]
+
+
+def _sweep_fetch_meetings(deal):
+    """The deal's meetings in start order, shaped for invite_sweep.aes_for_meeting."""
+    mids = _hs_assoc_ids(deal['id'], 'meetings', invite_sweep.MAX_MEETINGS)
+    cids = _hs_assoc_ids(deal['id'], 'contacts', 10)
+    prospects = [(c.get('email') or '').strip().lower()
+                 for c in _hs_batch_read('contacts', cids, ['email'])]
+    prospects = [e for e in prospects if e and not e.endswith('@furtherai.com')]
+    rows = _hs_batch_read('meetings', mids, ['hs_meeting_external_url', 'hs_meeting_start_time',
+                                             'hs_attendee_owner_ids', 'meeting_sourced_by'])
+    rows.sort(key=lambda p: p.get('hs_meeting_start_time') or '')
+    return [{'external_url': p.get('hs_meeting_external_url'),
+             'start_iso': p.get('hs_meeting_start_time'),
+             'attendee_owner_ids': invite_sweep.parse_owner_ids(p.get('hs_attendee_owner_ids')),
+             'booker_owner_id': deal.get('sourced_by') or p.get('meeting_sourced_by'),
+             'prospect_emails': prospects,
+             'name_terms': invite_sweep.name_terms(deal.get('name'))} for p in rows]
+
+
+def _sweep_read_owner(deal):
+    r = requests.get(f"https://api.hubapi.com/crm/v3/objects/deals/{deal['id']}",
+                     headers=HS, params={'properties': 'hubspot_owner_id'}, timeout=15)
+    r.raise_for_status()
+    return (r.json().get('properties') or {}).get('hubspot_owner_id') or ''
+
+
+def run_invite_sweep():
+    """One sweep pass. Returns the per-deal results (also printed)."""
+    import vp_escalation
+    ae_map = _ae_email_map()
+    out = invite_sweep.sweep_once(
+        fetch_deals=_sweep_fetch_deals, fetch_meetings=_sweep_fetch_meetings,
+        aes_fn=lambda m: invite_sweep.aes_for_meeting(
+            m, ae_email_map=ae_map, owner_email_fn=_owner_email,
+            resolve_fn=calendar_credit.resolve_ae_from_calendar,
+            decode_fn=vp_escalation.decode_event_url),
+        read_owner=_sweep_read_owner, assign_fn=_hs_set_deal_owner,
+        log_fn=calendar_credit.log_owner_change, assign_enabled=CREDIT_ASSIGN_ENABLED)
+    for r in out:
+        if r['action'] != 'skip' or r['reason'] == 'claimed':
+            who = _owner_name(r['assigned_to']) if r['assigned_to'] else None
+            print(f"[invite-sweep] {r['name']} ({r['deal_id']}): {r['action']} "
+                  f"{who or ''} wrote={r['wrote']} {r['reason'] or ''}", flush=True)
+    moved = sum(1 for r in out if r['wrote'])
+    print(f'[invite-sweep] {len(out)} deals checked, {moved} moved to the AE on the invite',
+          flush=True)
+    return out
 
 
 def _hs_search_total(obj, company_id, props):
@@ -3178,4 +3278,15 @@ if __name__ == '__main__':
                     print(f'[credit-retry] loop error: {e}', flush=True)
 
         threading.Thread(target=_credit_retry_loop, daemon=True).start()
+
+        def _invite_sweep_loop():
+            time.sleep(300)                           # after boot settles; runs once per 30-min process
+            try:
+                run_invite_sweep()
+            except Exception as e:
+                print(f'[invite-sweep] pass failed: {e}', flush=True)
+
+        if INVITE_SWEEP:
+            threading.Thread(target=_invite_sweep_loop, daemon=True).start()
+            print('[invite-sweep] scheduled 5 min after boot')
     handler.start()
