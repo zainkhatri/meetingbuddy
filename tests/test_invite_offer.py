@@ -446,3 +446,34 @@ def test_poster_allowed(monkeypatch):
     assert io.poster_allowed("U1") is True
     monkeypatch.setenv("INVITE_POSTERS", " U2 , U3 ")
     assert io.poster_allowed("U3") is True and io.poster_allowed("U1") is False
+
+
+# --- ask for the email when it's the only thing missing ---------------------
+
+from datetime import datetime as _dt, timezone as _tz
+
+_NOW = _dt(2099, 9, 1, tzinfo=_tz.utc)
+_BASE = {"organizer": "matthew@furtherai.com", "prospect_email": "", "company": "Assurant",
+         "prospect_name": "Noah Walsey", "start_utc": "2099-10-06T16:30:00Z"}
+
+
+def test_extract_email_plain_and_slack_mailto():
+    assert io.extract_email("its noah.walsey@assurant.com thx") == "noah.walsey@assurant.com"
+    assert io.extract_email("<mailto:Noah@Assurant.com|Noah@Assurant.com>") == "noah@assurant.com"
+    assert io.extract_email("no email here") == ""
+    assert io.extract_email("me: zain@furtherai.com") == ""   # internal never counts
+
+
+def test_needs_email_only_when_email_is_the_only_gap():
+    assert io.needs_email(dict(_BASE), now=_NOW)
+    assert not io.needs_email(dict(_BASE, prospect_email="n@assurant.com"), now=_NOW)
+    assert not io.needs_email(dict(_BASE, organizer=""), now=_NOW)
+    assert not io.needs_email(dict(_BASE, start_utc=""), now=_NOW)
+    assert not io.needs_email(dict(_BASE, start_utc="2099-09-01T00:30:00Z"), now=_NOW)  # imminent
+    assert not io.needs_email(dict(_BASE, start_utc="2099-08-01T00:00:00Z"), now=_NOW)  # past
+
+
+def test_ask_text_names_the_prospect_and_says_how_to_reply():
+    t = io.ask_email_text(dict(_BASE))
+    assert io.EMAIL_ASK_MARK in t and "Noah Walsey" in t and "Assurant" in t
+    assert "reply" in t.lower()

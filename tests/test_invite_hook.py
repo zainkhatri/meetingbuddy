@@ -176,3 +176,86 @@ def test_non_poster_click_rejected(monkeypatch):
     offer.update(poster_slack='U1', start_utc='2099-01-01T00:00:00Z', prospect_email='p@x.com')
     mb.handle_invite_send(lambda: None, offer_body, c, {'value': invite_offer.encode_payload(offer)})
     assert called == [] and 'Only the person' in c.eph[0]['text']
+
+
+# --- no email: ask in the thread, finish the offer when someone replies -----
+
+class _MetaClient(_Client):
+    """conversations_replies returns whatever the bot posted (with metadata)."""
+    def conversations_replies(self, **_):
+        return {'messages': [{'ts': '123.456', 'text': 'booking'}] + [
+            {'ts': f'9.{i}', 'bot_id': 'B1', 'text': p.get('text', ''), 'metadata': p.get('metadata')}
+            for i, p in enumerate(self.posted)]}
+
+
+def _setup(monkeypatch, c, exists=False):
+    monkeypatch.setattr(type(mb.app), 'client', property(lambda self: c))
+    monkeypatch.setenv('AUTO_INVITE', '1')
+    monkeypatch.setenv('INVITE_OFFER_DELAY_S', '0')
+    monkeypatch.setattr(mb, '_invite_roster', lambda: [])
+    monkeypatch.setattr(mb, '_owner_email', lambda oid: {'88760040': 'zain@furtherai.com',
+                                                        '165453251': 'nick@furtherai.com'}.get(oid))
+    monkeypatch.setattr(mb, '_owner_name', lambda oid: 'Nick Margay')
+    monkeypatch.setattr(mb, '_conf_label', lambda v: 'ITC Vegas 2026')
+    monkeypatch.setattr(invite_offer, 'apollo_email', lambda *a, **k: '')
+    monkeypatch.setattr(invite_offer, 'invite_exists', lambda *a, **k: exists)
+
+
+def _no_email_booking(monkeypatch, c, exists=False):
+    _setup(monkeypatch, c, exists)
+    mb._maybe_offer_invite(dict(PARSED, contact_email=''), CO, None, '88760040', 'U_ZAIN',
+                           mb.CONFERENCE_MEETINGS_CHANNEL, '123.456', 15)
+
+
+def test_no_email_asks_for_it_in_the_thread(monkeypatch):
+    c = _MetaClient()
+    _no_email_booking(monkeypatch, c)
+    assert len(c.posted) == 1
+    ask = c.posted[0]
+    assert ask['thread_ts'] == '123.456' and invite_offer.EMAIL_ASK_MARK in ask['text']
+    assert ask['metadata']['event_type'] == mb._EMAIL_ASK_EVENT
+    assert 'blocks' not in ask   # no Send button until there is an address
+
+
+def test_no_email_but_invite_exists_stays_quiet(monkeypatch):
+    c = _MetaClient()
+    _no_email_booking(monkeypatch, c, exists=True)
+    assert c.posted == []
+
+
+def test_no_email_ask_is_posted_once(monkeypatch):
+    c = _MetaClient()
+    _no_email_booking(monkeypatch, c)
+    _no_email_booking(monkeypatch, c)   # replay / sweep
+    assert len(c.posted) == 1
+
+
+def test_email_reply_posts_the_send_preview(monkeypatch):
+    c = _MetaClient()
+    _no_email_booking(monkeypatch, c)
+    handled = mb._maybe_handle_email_reply(mb.CONFERENCE_MEETINGS_CHANNEL, '123.456',
+                                          'here you go <mailto:tanya@hanover.com|tanya@hanover.com>')
+    assert handled
+    assert len(c.posted) == 2
+    offer = invite_offer.decode_payload(c.posted[1]['blocks'][1]['elements'][0]['value'])
+    assert offer['prospect_email'] == 'tanya@hanover.com'
+    assert offer['organizer'] == 'zain@furtherai.com' and offer['ae_email'] == 'nick@furtherai.com'
+    # a second reply after the preview is up does nothing
+    assert mb._maybe_handle_email_reply(mb.CONFERENCE_MEETINGS_CHANNEL, '123.456', 'tanya@hanover.com')
+    assert len(c.posted) == 2
+
+
+def test_email_reply_without_an_ask_is_ignored(monkeypatch):
+    c = _MetaClient()
+    _setup(monkeypatch, c)
+    assert not mb._maybe_handle_email_reply(mb.CONFERENCE_MEETINGS_CHANNEL, '123.456', 'x@hanover.com')
+    assert c.posted == []
+
+
+def test_email_reply_when_invite_appeared_meanwhile_says_so(monkeypatch):
+    c = _MetaClient()
+    _no_email_booking(monkeypatch, c)
+    monkeypatch.setattr(invite_offer, 'invite_exists', lambda *a, **k: True)
+    assert mb._maybe_handle_email_reply(mb.CONFERENCE_MEETINGS_CHANNEL, '123.456', 'tanya@hanover.com')
+    assert len(c.posted) == 2 and 'blocks' not in c.posted[1]
+    assert 'already' in c.posted[1]['text'].lower()

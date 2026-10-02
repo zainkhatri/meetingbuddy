@@ -131,6 +131,38 @@ def decide_offer(offer: dict, *, invite_exists: Optional[bool], now: datetime):
     return (True, "ok")
 
 
+EMAIL_ASK_MARK = "Need an email to send the invite"
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def extract_email(text: str) -> str:
+    """First outside email in a Slack message (handles <mailto:a@b|a@b>), lowercased."""
+    assert text is None or isinstance(text, str), "text must be str"
+    for m in _EMAIL_RE.findall(text or "")[:10]:   # bounded
+        em = m.strip(".'").lower()
+        if not em.endswith("@" + DOMAIN):
+            return em
+    return ""
+
+
+def needs_email(offer: dict, *, now: datetime) -> bool:
+    """True when the prospect email is the ONLY thing stopping an offer."""
+    assert isinstance(offer, dict), "offer must be a dict"
+    if (offer.get("prospect_email") or "").strip():
+        return False
+    ok, _ = decide_offer(dict(offer, prospect_email="placeholder@example.com"),
+                         invite_exists=False, now=now)
+    return ok
+
+
+def ask_email_text(offer: dict) -> str:
+    assert isinstance(offer, dict), "offer must be a dict"
+    who = offer.get("prospect_name") or "the prospect"
+    co = offer.get("company") or "this account"
+    return (f":email: *{EMAIL_ASK_MARK}* to {who} ({co}). I couldn't find it in HubSpot "
+            f"or Apollo. Reply in this thread with their email and I'll set up the invite.")
+
+
 def event_title(offer: dict) -> str:
     assert isinstance(offer, dict), "offer must be a dict"
     company = (offer.get("company") or offer.get("prospect_name") or "Meeting").strip()

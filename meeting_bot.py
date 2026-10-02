@@ -1357,6 +1357,10 @@ def handle_message(event, client, say, logger):
         thread_ts = event.get('thread_ts')
     if not text or not ts:
         return
+    # Reply with the prospect's email under our "need an email" ask -> post the Send preview
+    if not subtype and thread_ts and thread_ts != ts and \
+            _maybe_handle_email_reply(event.get('channel'), thread_ts, text):
+        return
     if _is_conference_reply(event, ts):
         _handle_conference_reply(event['thread_ts'], text, say)
         return
@@ -1773,18 +1777,83 @@ def _offer_invite_now(parsed, co, contact, owner_id, poster, channel, ts, durati
             dict(parsed, contact_email=email), organizer=organizer or '', poster_slack=poster,
             ae_email=ae_email, ae_name=ae_name, is_conference=is_conf,
             duration_min=int(duration_min or 30), conf_label=_conf_label(conf) if conf else '')
-        exists = None
-        if offer['start_utc'] and offer['prospect_email'] and offer['organizer']:
-            exists = _invite_check(offer)
-        ok, reason = invite_offer.decide_offer(offer, invite_exists=exists, now=datetime.now(timezone.utc))
-        print(f'[invite] ts={ts} offer={ok} reason={reason} company={offer["company"]!r}', flush=True)
-        if not ok:
+        if invite_offer.needs_email(offer, now=datetime.now(timezone.utc)):
+            _ask_for_email(offer, channel, ts)
             return
+        _post_offer(offer, channel, ts)
+    except Exception as e:
+        print(f'[invite] offer skipped (non-fatal): {e}', flush=True)
+
+
+def _post_offer(offer, channel, ts):
+    """Calendar check + decide; post the Send/Skip preview when clear. Returns the reason."""
+    exists = None
+    if offer['start_utc'] and offer['prospect_email'] and offer['organizer']:
+        exists = _invite_check(offer)
+    ok, reason = invite_offer.decide_offer(offer, invite_exists=exists, now=datetime.now(timezone.utc))
+    print(f'[invite] ts={ts} offer={ok} reason={reason} company={offer["company"]!r}', flush=True)
+    if ok:
         app.client.chat_postMessage(channel=channel, thread_ts=ts,
                                     blocks=invite_offer.preview_blocks(offer),
                                     text=f"{_INVITE_MARK}: {invite_offer.event_title(offer)}")
+    return reason
+
+
+_EMAIL_ASK_EVENT = 'invite_email_ask'
+_EMAIL_DONE = 'Got the email'
+
+
+def _ask_for_email(offer, channel, ts):
+    """Email is the only gap: if nobody has it on a calendar (name/company match),
+    ask in the thread. The offer rides in the message metadata so a reply can finish
+    it after any restart."""
+    if _thread_has_mark(app.client, channel, ts, invite_offer.EMAIL_ASK_MARK):
+        return
+    exists = _invite_check(offer)
+    print(f'[invite] ts={ts} offer=False reason=no_email exists={exists} company={offer["company"]!r}'
+          f'{" -> asking for email" if exists is False else ""}', flush=True)
+    if exists is not False:
+        return
+    app.client.chat_postMessage(
+        channel=channel, thread_ts=ts, text=invite_offer.ask_email_text(offer),
+        metadata={'event_type': _EMAIL_ASK_EVENT,
+                  'event_payload': {'offer': invite_offer.encode_payload(offer)}})
+
+
+def _maybe_handle_email_reply(channel, thread_ts, text):
+    """A thread reply carrying an email under our ask: finish the offer. True when
+    the reply belonged to an ask (handled), False to let normal handling continue."""
+    if not invite_offer.enabled():
+        return False
+    email = invite_offer.extract_email(text)
+    if not email:
+        return False
+    try:
+        msgs = app.client.conversations_replies(channel=channel, ts=thread_ts, limit=50,
+                                                include_all_metadata=True).get('messages', [])
     except Exception as e:
-        print(f'[invite] offer skipped (non-fatal): {e}', flush=True)
+        print(f'[invite] email reply: thread read failed: {e}', flush=True)
+        return False
+    ask = next((m for m in msgs if m.get('bot_id')
+                and (m.get('metadata') or {}).get('event_type') == _EMAIL_ASK_EVENT), None)
+    if not ask:
+        return False
+    if any(m.get('bot_id') and (_INVITE_MARK in (m.get('text') or '') or _EMAIL_DONE in (m.get('text') or ''))
+           for m in msgs):
+        return True   # preview already up or already answered
+    offer = invite_offer.decode_payload(((ask.get('metadata') or {}).get('event_payload') or {}).get('offer'))
+    if not offer:
+        return True
+    offer['prospect_email'] = email
+    with _invite_lock(thread_ts):
+        reason = _post_offer(offer, channel, thread_ts)
+    if reason == 'ok':
+        return True
+    why = {'invite_exists': f"an invite with {email} is already on a teammate's calendar, so I won't send another",
+           'past': 'the meeting time has already passed',
+           'imminent': 'the meeting starts within the hour'}.get(reason, f"I couldn't check the calendars ({reason})")
+    app.client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=f"{_EMAIL_DONE}, but {why}.")
+    return True
 
 
 def _invite_done_blocks(text):
