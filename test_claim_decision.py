@@ -37,10 +37,10 @@ def test_claim_cap_even_split():
     assert m.claim_cap(15, 5) == 3 and m.claim_cap(10, 5) == 2 and m.claim_cap(3, 5) == 1
     assert m.claim_cap(12, 5) == 3         # ceil(12/5)
     assert m.claim_cap(0) == 0
-    assert m.claim_cap(12) == 4            # live split: Jacob/Ben/Matt -> ceil(12/3)
+    assert m.claim_cap(12) == 3            # live split: Jacob/Ben/Matt/Ethan -> ceil(12/4)
 
 def test_departed_bdrs_cannot_claim():
-    assert sorted(m.SDR_SLACK.values()) == ['Ben', 'Jacob', 'Matt'] and m.NBDRS == 3
+    assert sorted(m.SDR_SLACK.values()) == ['Ben', 'Ethan', 'Jacob', 'Matt'] and m.NBDRS == 4
 
 def test_count_company_rows_counts_open_and_claimed():
     blocks = _digest(13, claimed=[(100, 'Zain'), (101, 'Zain')])   # 15 total, header ignored

@@ -20,11 +20,12 @@ from typing import Callable, Optional
 AE_IDS = frozenset({'163071452', '96605305', '162894707', '84250910', '165453251',
                     '166089614', '165453250', '654909503', '164601691'})
 
-# BDR owner ids (Matt, Dani, Jacob, Zain, Ben) — also mirrored from that cron. A
+# BDR owner ids (Matt, Dani, Jacob, Zain, Ben, Ethan) — also mirrored from that cron. A
 # demo deal may be auto-credited only when it is Unassigned/ownerless OR still owned
 # by the booking BDR; a deal claimed by ANY other human (a non-AE manager/ops/founder)
 # is never overwritten — only its AE, if any, is trusted. Keep in sync.
-BDR_IDS = frozenset({'92184259', '82377567', '162210484', '88760040', '164943105'})
+BDR_IDS = frozenset({'92184259', '82377567', '162210484', '88760040', '164943105',
+                     '169036459'})
 
 
 def decide_action(incumbent_ae: Optional[str], ae_on_invite):

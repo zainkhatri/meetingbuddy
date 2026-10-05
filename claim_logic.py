@@ -11,6 +11,7 @@ SDR_SLACK = {
     'U0ADR5W8Q10': 'Jacob',    # Jacob Sanders
     'U0B5J4MDC4T': 'Ben',      # Ben Trotter
     'U0B2WK6G3R9': 'Matt',     # Matt Stapleton
+    'U0C6UC4T6AV': 'Ethan',    # Ethan Kulp (joined 2026-10)
 }
 NBDRS = len(SDR_SLACK)         # even-split cap: each BDR may claim ceil(digest_size / NBDRS)
 SDR_SLACK_REV = {name: uid for uid, name in SDR_SLACK.items()}

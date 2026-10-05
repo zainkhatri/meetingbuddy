@@ -51,7 +51,7 @@ _EMAIL_RE           = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")  # extract full ema
 # Known BDR/SDR emails — any calendar event with one of these as an attendee
 # (when the AE is NOT the organizer) is a BDR-sourced meeting and is excluded.
 # Configurable via BLITZ_BDRS env var (comma-separated) to avoid hardcoding.
-_DEFAULT_BDRS = "zain@furtherai.com,jacob@furtherai.com,daniella@furtherai.com,benjamin.t@furtherai.com,matthew@furtherai.com"
+_DEFAULT_BDRS = "zain@furtherai.com,jacob@furtherai.com,daniella@furtherai.com,benjamin.t@furtherai.com,matthew@furtherai.com,ethan@furtherai.com"
 BDR_EMAILS = {e.strip().lower() for e in os.environ.get("BLITZ_BDRS", _DEFAULT_BDRS).split(",") if e.strip()}
 
 

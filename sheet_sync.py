@@ -56,6 +56,7 @@ OWNER_DISPLAY = {
     '82377567': 'Dani',
     '164943105': 'Ben',
     '92184259': 'Matt',
+    '169036459': 'Ethan',
 }
 
 # Columns the bot re-derives from HubSpot every reconcile — a non-empty new
