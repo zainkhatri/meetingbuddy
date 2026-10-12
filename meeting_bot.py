@@ -3193,6 +3193,25 @@ def _track_last_event(next, body):
     next()
 
 
+def form_watch_loop():
+    """Conference landing-page meeting forms → #conference-meetings post + tracker row.
+    Off unless FORM_WATCH_ENABLED=1. Dedup lives in the channel, so restarts are safe."""
+    import form_watch
+    if os.environ.get('FORM_WATCH_ENABLED') != '1':
+        print('[form-watch] disabled (FORM_WATCH_ENABLED!=1)')
+        return
+    interval = int(os.environ.get('FORM_WATCH_POLL_SECS', '300'))
+    time.sleep(45)
+    while True:
+        try:
+            counts = form_watch.run_once(hs=HS, slack=app.client, channel=CONFERENCE_MEETINGS_CHANNEL,
+                                         detect_conference=detect_conference_from_title)
+            print(f'[form-watch] {counts}', flush=True)
+        except Exception as e:
+            print(f'[form-watch] error: {e}', flush=True)
+        time.sleep(interval)
+
+
 def periodic_restart(interval_seconds=1800):
     # Unconditional restart every 30 min. Most reliable defense against
     # any future "socket up, events stopped" failure mode we haven't yet
@@ -3272,6 +3291,7 @@ if __name__ == '__main__':
     threading.Thread(target=replay_missed_messages, daemon=True).start()
     print('[replay] startup replay scheduled (last 24h)')
     threading.Thread(target=live_sweep_loop, daemon=True).start()
+    threading.Thread(target=form_watch_loop, daemon=True).start()
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     threading.Thread(target=socket_watchdog, args=(handler,), daemon=True).start()
     print('[watchdog] socket health watchdog started (30s checks, 120s tolerance)')
