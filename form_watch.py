@@ -32,7 +32,7 @@ MAX_CONTACTS = 200          # upper bound on submissions handled per poll
 MAX_FORM_PAGES = 10         # 100 forms/page
 MAX_SUB_PAGES = 10          # 50 submissions/page, per form
 INTERNAL_DOMAINS = ('@furtherai.com', '@further.ai')
-DIVIDER = '-' * 40  # renders as a rule between contacts in Slack
+MAX_BLOCKS = 24             # Slack caps a message at 50 blocks (title + 2 per contact)
 META_TYPE = 'form_watch'  # Slack message metadata carries dedup keys, out of sight
 KEY_RE = re.compile(r'form-sub:\d+:[0-9T:\-]+')
 MAX_MEETINGS = 50           # upper bound on meetings inspected per contact
@@ -164,12 +164,19 @@ def contact_block(*, contact, ae_mention, meeting):
     return '\n'.join(lines)
 
 
-def slack_text(conference, blocks):
-    """One post per conference per poll; contacts divided by a dashed line."""
+def slack_title(conference):
+    assert conference
+    return f'{conference}: meeting requests from the landing page'
+
+
+def slack_blocks(conference, blocks):
+    """Block Kit post: title, then each contact separated by a divider line."""
     assert conference
     assert blocks
-    head = f'*{conference}: meeting requests from the landing page*'
-    return f'\n{DIVIDER}\n'.join([head] + list(blocks))
+    out = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': f'*{slack_title(conference)}*'}}]
+    for b in blocks[:MAX_BLOCKS]:
+        out += [{'type': 'divider'}, {'type': 'section', 'text': {'type': 'mrkdwn', 'text': b}}]
+    return out
 
 
 # ---------- I/O ----------
@@ -377,10 +384,18 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
             pending.setdefault(conference, []).append((key, block))
             seen_keys.add(key)
     for conference, items in pending.items():
-        keys = [k for k, _ in items]
-        slack.chat_postMessage(channel=channel, text=slack_text(conference, [b for _, b in items]),
-                               unfurl_links=False,
-                               metadata={'event_type': META_TYPE, 'event_payload': {'keys': keys}})
-        _POSTED.update(keys)
-        counts['posted'] += len(keys)
+        for i in range(0, len(items), MAX_BLOCKS):
+            _post(slack, channel, conference, items[i:i + MAX_BLOCKS])
+            counts['posted'] += len(items[i:i + MAX_BLOCKS])
     return counts
+
+
+def _post(slack, channel, conference, items):
+    assert items
+    assert len(items) <= MAX_BLOCKS
+    keys = [k for k, _ in items]
+    slack.chat_postMessage(channel=channel, text=slack_title(conference),
+                           blocks=slack_blocks(conference, [b for _, b in items]),
+                           unfurl_links=False,
+                           metadata={'event_type': META_TYPE, 'event_payload': {'keys': keys}})
+    _POSTED.update(keys)

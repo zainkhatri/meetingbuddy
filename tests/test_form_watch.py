@@ -66,13 +66,15 @@ def test_merge_graduates_requested_row_but_keeps_human_cells():
     assert not changed2 and again == merged
 
 
-def test_slack_text_divides_contacts_and_hides_keys():
+def test_slack_blocks_divide_contacts_and_hide_keys():
     b1 = fw.contact_block(contact=CONTACT, ae_mention='<@U1>', meeting=None)
     b2 = fw.contact_block(contact=dict(CONTACT, firstname='Marissa', lastname='Moscowitz'), ae_mention='<@U2>',
                           meeting=_mtg('2026-10-12T22:30:00Z'))
-    t = fw.slack_text('WSIA Underwriting Summit', [b1, b2])
-    assert t.count(fw.DIVIDER) == 2 and '<@U1>' in t and '10/12 6:30 PM ET' in t
-    assert 'form-sub' not in t and '181525873848' not in t
+    blocks = fw.slack_blocks('WSIA Underwriting Summit', [b1, b2])
+    assert [b['type'] for b in blocks] == ['section', 'divider', 'section', 'divider', 'section']
+    flat = str(blocks)
+    assert '<@U1>' in flat and '10/12 6:30 PM ET' in flat
+    assert 'form-sub' not in flat and '181525873848' not in flat and '--' not in flat
 
 
 def test_is_test_submission():
@@ -91,8 +93,8 @@ class _FakeSlack:
         return {'messages': self.history}
 
     def chat_postMessage(self, **kw):
-        assert 'form-sub' not in kw['text']
-        self.posts.append(kw['text'])
+        assert 'form-sub' not in kw['text'] + str(kw['blocks'])
+        self.posts.append(kw['blocks'])
         self.history.insert(0, {'ts': '9999999999.0', 'text': kw['text'], 'metadata': kw['metadata']})
 
     def users_list(self, **kw):
