@@ -66,13 +66,13 @@ def test_merge_graduates_requested_row_but_keeps_human_cells():
     assert not changed2 and again == merged
 
 
-def test_slack_text_has_dedup_key_and_ae_ping():
-    key = fw.dedup_key('181525873848', '2026-10-08T12:54:53')
-    t = fw.slack_text(conference='WSIA Underwriting Summit', contact=CONTACT, form_name='WSIA 2026 Meeting Form',
-                      ae_mention='<@U1>', meeting=None, key=key)
-    assert key in t and '<@U1>' in t
-    import re
-    assert re.findall(r'form-sub:\d+:[0-9T:\-]+', t) == [key]
+def test_slack_text_divides_contacts_and_hides_keys():
+    b1 = fw.contact_block(contact=CONTACT, ae_mention='<@U1>', meeting=None)
+    b2 = fw.contact_block(contact=dict(CONTACT, firstname='Marissa', lastname='Moscowitz'), ae_mention='<@U2>',
+                          meeting=_mtg('2026-10-12T22:30:00Z'))
+    t = fw.slack_text('WSIA Underwriting Summit', [b1, b2])
+    assert t.count(fw.DIVIDER) == 2 and '<@U1>' in t and '10/12 6:30 PM ET' in t
+    assert 'form-sub' not in t and '181525873848' not in t
 
 
 def test_is_test_submission():
@@ -91,8 +91,9 @@ class _FakeSlack:
         return {'messages': self.history}
 
     def chat_postMessage(self, **kw):
+        assert 'form-sub' not in kw['text']
         self.posts.append(kw['text'])
-        self.history.insert(0, {'ts': '9999999999.0', 'text': kw['text']})
+        self.history.insert(0, {'ts': '9999999999.0', 'text': kw['text'], 'metadata': kw['metadata']})
 
     def users_list(self, **kw):
         return {'members': []}
@@ -112,6 +113,9 @@ def test_run_once_posts_once_across_polls(monkeypatch):
     slack = _FakeSlack([{'ts': '1791000000.0', 'text': 'older chatter'}])
     for _ in range(3):
         fw.run_once(hs={'Authorization': 'x'}, slack=slack, channel='C', detect_conference=lambda n: 'wsia_uw_summit')
+    assert len(slack.posts) == 1
+    fw._POSTED.clear()  # fresh process (redeploy): dedup must come from the hidden metadata alone
+    fw.run_once(hs={'Authorization': 'x'}, slack=slack, channel='C', detect_conference=lambda n: 'wsia_uw_summit')
     assert len(slack.posts) == 1
 
 

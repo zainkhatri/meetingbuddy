@@ -32,6 +32,8 @@ MAX_CONTACTS = 200          # upper bound on submissions handled per poll
 MAX_FORM_PAGES = 10         # 100 forms/page
 MAX_SUB_PAGES = 10          # 50 submissions/page, per form
 INTERNAL_DOMAINS = ('@furtherai.com', '@further.ai')
+DIVIDER = '-' * 40  # renders as a rule between contacts in Slack
+META_TYPE = 'form_watch'  # Slack message metadata carries dedup keys, out of sight
 KEY_RE = re.compile(r'form-sub:\d+:[0-9T:\-]+')
 MAX_MEETINGS = 50           # upper bound on meetings inspected per contact
 HISTORY_LIMIT = 1000        # channel messages scanned for dedup keys
@@ -144,24 +146,30 @@ def merge_form_row(header_row, current, payload, last_col):
     return merged, changed
 
 
-def slack_text(*, conference, contact, form_name, ae_mention, meeting, key):
-    assert conference and key
+def contact_block(*, contact, ae_mention, meeting):
+    """One contact's lines in the channel post (no internal ids)."""
     assert isinstance(contact, dict)
+    assert meeting is None or isinstance(meeting, dict)
     name = ' '.join(filter(None, [contact.get('firstname'), contact.get('lastname')])) or 'Unknown'
-    who = name + (f" – {contact['jobtitle']}" if contact.get('jobtitle') else '')
+    who = f'*{name}*' + (f", {contact['jobtitle']}" if contact.get('jobtitle') else '')
     who += f" @ {contact['company']}" if contact.get('company') else ''
-    lines = [f':inbox_tray: *{conference} meeting request (landing-page form)*', who]
-    if contact.get('email'):
-        lines.append(contact['email'])
+    lines = [who] + ([contact['email']] if contact.get('email') else [])
     mp = (meeting or {}).get('properties') or {}
     if meeting:
-        when = f"{sheet_sync._fmt_date(mp.get('hs_meeting_start_time'))} " \
-               f"{sheet_sync._fmt_time(mp.get('hs_meeting_start_time'))}"
-        lines.append(f":calendar: On the calendar: {mp.get('hs_meeting_title') or 'meeting'} – {when}")
+        start = mp.get('hs_meeting_start_time')
+        when = f'{sheet_sync._fmt_date(start)} {sheet_sync._fmt_time(start)}'
+        lines.append(f":calendar: On the calendar: {mp.get('hs_meeting_title') or 'meeting'}, {when}")
     else:
-        lines.append(f':warning: No meeting on the calendar yet. {ae_mention or "AE"} please reach out to schedule.')
-    lines.append(f'_{form_name} · added to the meeting tracker · {key}_')
+        lines.append(f':warning: No meeting yet. {ae_mention or "AE"} please reach out to schedule.')
     return '\n'.join(lines)
+
+
+def slack_text(conference, blocks):
+    """One post per conference per poll; contacts divided by a dashed line."""
+    assert conference
+    assert blocks
+    head = f'*{conference}: meeting requests from the landing page*'
+    return f'\n{DIVIDER}\n'.join([head] + list(blocks))
 
 
 # ---------- I/O ----------
@@ -293,12 +301,17 @@ def posted_keys(slack, channel, since_ts):
     made every poll repost (2026-10-12). Page newest-first and stop at since_ts."""
     keys, cursor, scanned = set(), None, 0
     for _ in range(HISTORY_LIMIT // 200):
-        kw = {'channel': channel, 'limit': 200, **({'cursor': cursor} if cursor else {})}
+        kw = {'channel': channel, 'limit': 200, 'include_all_metadata': True,
+              **({'cursor': cursor} if cursor else {})}
         resp = slack.conversations_history(**kw)
         msgs = resp.get('messages', [])
         scanned += len(msgs)
         for m in msgs:
             keys.update(KEY_RE.findall(m.get('text') or ''))
+            meta = m.get('metadata') or {}
+            if meta.get('event_type') == META_TYPE:
+                keys.update(k for k in (meta.get('event_payload') or {}).get('keys', [])[:MAX_CONTACTS]
+                            if KEY_RE.fullmatch(str(k)))
         if not msgs or float(msgs[-1]['ts']) < since_ts:
             break
         cursor = (resp.get('response_metadata') or {}).get('next_cursor')
@@ -339,6 +352,7 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
     if subs and scanned == 0:
         post = False  # can't prove what's already posted — never guess, never spam
         counts['skipped'] += len(subs)
+    pending = {}  # conference → [(key, contact block)], one post per conference
     for c in subs[:MAX_CONTACTS]:
         counts['seen'] += 1
         p = c.get('properties') or {}
@@ -359,10 +373,14 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
         key = dedup_key(c['id'], sub_dt.strftime('%Y-%m-%dT%H:%M:%S'))
         if post and key not in seen_keys:
             uid = slack_id_by_name(slack, ae_full)
-            text = slack_text(conference=conference, contact=p, form_name=form_name,
-                              ae_mention=f'<@{uid}>' if uid else ae_first, meeting=meeting, key=key)
-            slack.chat_postMessage(channel=channel, text=text, unfurl_links=False)
+            block = contact_block(contact=p, ae_mention=f'<@{uid}>' if uid else ae_first, meeting=meeting)
+            pending.setdefault(conference, []).append((key, block))
             seen_keys.add(key)
-            _POSTED.add(key)
-            counts['posted'] += 1
+    for conference, items in pending.items():
+        keys = [k for k, _ in items]
+        slack.chat_postMessage(channel=channel, text=slack_text(conference, [b for _, b in items]),
+                               unfurl_links=False,
+                               metadata={'event_type': META_TYPE, 'event_payload': {'keys': keys}})
+        _POSTED.update(keys)
+        counts['posted'] += len(keys)
     return counts
