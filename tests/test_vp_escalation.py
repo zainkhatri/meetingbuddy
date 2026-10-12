@@ -275,3 +275,12 @@ def test_contact_from_parsed_end_to_end():
     cd = vp.contact_from_parsed({"contact_title": "VP Corporate Development",
                                  "segment": "carrier", "company_size": "3000"})
     assert vp.is_escalation_candidate(_demo(), cd) is False
+
+
+def test_junior_titles_with_vp_keywords_are_not_vp_plus():
+    """AVP / Associate Partner contain 'vice president' / 'partner' but are director-level."""
+    for t in ("Assistant Vice President", "Associate Vice President, Claims",
+              "AVP | Property Broker", "Associate Partner"):
+        assert vp._norm_seniority(t) == "director", t
+    for t in ("Vice President", "Senior Partner", "Managing Partner", "SVP", "Chief Executive Officer"):
+        assert vp._norm_seniority(t) == "vp_plus", t

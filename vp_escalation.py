@@ -336,6 +336,10 @@ def _other(exec_name: str) -> str:
 # ── Parser → canonical ICP mapping ───────────────────────────────────────────
 _SEGMENT_MAP = {"brokerage": "broker", "carrier": "p&c_carrier", "mga": "mga"}
 _SENIORITY_KW = (                       # order matters: first hit wins (senior→junior)
+    # Junior titles that contain a VP+ keyword must win first, or "Assistant Vice
+    # President" / "Associate Partner" read as VP+ and pull an exec onto the invite.
+    ("director", ("assistant vice president", "associate vice president", "avp",
+                  "associate partner")),
     ("vp_plus", ("chief", "ceo", "cfo", "coo", "cto", "cio", "cro", "cxo",
                  "president", "founder", "owner", "partner", "svp", "evp",
                  "vice president", "vp")),
