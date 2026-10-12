@@ -80,3 +80,43 @@ def test_is_test_submission():
     assert fw.is_test_submission({'email': 'test2@testing123.com', 'firstname': 'test2'})
     assert fw.is_test_submission({'email': 'x@acme.com', 'firstname': 'testing'})
     assert not fw.is_test_submission({'email': 'dmoler@sompo-intl.com', 'firstname': 'Daniel'})
+
+
+class _FakeSlack:
+    def __init__(self, history):
+        self.history, self.posts = history, []
+
+    def conversations_history(self, **kw):
+        assert 'oldest' not in kw  # Slack drops results with oldest (2026-10-12 spam)
+        return {'messages': self.history}
+
+    def chat_postMessage(self, **kw):
+        self.posts.append(kw['text'])
+        self.history.insert(0, {'ts': '9999999999.0', 'text': kw['text']})
+
+    def users_list(self, **kw):
+        return {'members': []}
+
+
+def _patch_io(monkeypatch):
+    sub = {'id': '181525873848', 'properties': dict(CONTACT, recent_conversion_event_name='WSIA 2026 Meeting Form')}
+    monkeypatch.setattr(fw, 'search_submissions', lambda hs, now: [sub])
+    monkeypatch.setattr(fw, 'contact_meetings', lambda hs, cid: [])
+    monkeypatch.setattr(fw, 'owner_info', lambda hs, oid: ('Mike', 'Mike Harris'))
+    monkeypatch.setattr(fw, 'upsert_form_row', lambda payload: 'noop')
+    fw._POSTED.clear()
+
+
+def test_run_once_posts_once_across_polls(monkeypatch):
+    _patch_io(monkeypatch)
+    slack = _FakeSlack([{'ts': '1791000000.0', 'text': 'older chatter'}])
+    for _ in range(3):
+        fw.run_once(hs={'Authorization': 'x'}, slack=slack, channel='C', detect_conference=lambda n: 'wsia_uw_summit')
+    assert len(slack.posts) == 1
+
+
+def test_run_once_never_posts_when_history_unreadable(monkeypatch):
+    _patch_io(monkeypatch)
+    slack = _FakeSlack([])
+    c = fw.run_once(hs={'Authorization': 'x'}, slack=slack, channel='C', detect_conference=lambda n: 'wsia_uw_summit')
+    assert slack.posts == [] and c['posted'] == 0

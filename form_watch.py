@@ -32,6 +32,7 @@ MAX_CONTACTS = 200          # upper bound on submissions handled per poll
 MAX_FORM_PAGES = 10         # 100 forms/page
 MAX_SUB_PAGES = 10          # 50 submissions/page, per form
 INTERNAL_DOMAINS = ('@furtherai.com', '@further.ai')
+KEY_RE = re.compile(r'form-sub:\d+:[0-9T:\-]+')
 MAX_MEETINGS = 50           # upper bound on meetings inspected per contact
 HISTORY_LIMIT = 1000        # channel messages scanned for dedup keys
 CONTACT_PROPS = ['firstname', 'lastname', 'email', 'company', 'jobtitle',
@@ -283,19 +284,27 @@ def slack_id_by_name(slack, full_name):
     return None
 
 
+_POSTED = set()  # keys this process has posted — survives a failed history read
+
+
 def posted_keys(slack, channel, since_ts):
-    """Dedup keys already in the channel since `since_ts`."""
-    keys, cursor = set(), None
+    """(dedup keys already in the channel since `since_ts`, messages scanned).
+    No `oldest` param: Slack intermittently returns zero messages with it, which
+    made every poll repost (2026-10-12). Page newest-first and stop at since_ts."""
+    keys, cursor, scanned = set(), None, 0
     for _ in range(HISTORY_LIMIT // 200):
-        resp = slack.conversations_history(channel=channel, oldest=str(since_ts), limit=200,
-                                           cursor=cursor) if cursor else \
-            slack.conversations_history(channel=channel, oldest=str(since_ts), limit=200)
-        for m in resp.get('messages', []):
-            keys.update(re.findall(r'form-sub:\d+:[0-9T:\-]+', m.get('text') or ''))
+        kw = {'channel': channel, 'limit': 200, **({'cursor': cursor} if cursor else {})}
+        resp = slack.conversations_history(**kw)
+        msgs = resp.get('messages', [])
+        scanned += len(msgs)
+        for m in msgs:
+            keys.update(KEY_RE.findall(m.get('text') or ''))
+        if not msgs or float(msgs[-1]['ts']) < since_ts:
+            break
         cursor = (resp.get('response_metadata') or {}).get('next_cursor')
         if not cursor:
             break
-    return keys
+    return keys, scanned
 
 
 def upsert_form_row(payload):
@@ -325,7 +334,11 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
     now = now or time.time()
     counts = {'seen': 0, 'posted': 0, 'rows': 0, 'skipped': 0}
     subs = search_submissions(hs, now)
-    seen_keys = posted_keys(slack, channel, now - (LOOKBACK_DAYS + 1) * 86400) if subs else set()
+    seen_keys, scanned = posted_keys(slack, channel, now - (LOOKBACK_DAYS + 1) * 86400) if subs else (set(), 0)
+    seen_keys |= _POSTED
+    if subs and scanned == 0:
+        post = False  # can't prove what's already posted — never guess, never spam
+        counts['skipped'] += len(subs)
     for c in subs[:MAX_CONTACTS]:
         counts['seen'] += 1
         p = c.get('properties') or {}
@@ -350,5 +363,6 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
                               ae_mention=f'<@{uid}>' if uid else ae_first, meeting=meeting, key=key)
             slack.chat_postMessage(channel=channel, text=text, unfurl_links=False)
             seen_keys.add(key)
+            _POSTED.add(key)
             counts['posted'] += 1
     return counts
