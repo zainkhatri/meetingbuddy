@@ -86,7 +86,7 @@ def test_is_test_submission():
 
 class _FakeSlack:
     def __init__(self, history):
-        self.history, self.posts = history, []
+        self.history, self.posts, self.edits = history, [], []
 
     def conversations_history(self, **kw):
         assert 'oldest' not in kw  # Slack drops results with oldest (2026-10-12 spam)
@@ -95,18 +95,30 @@ class _FakeSlack:
     def chat_postMessage(self, **kw):
         assert 'form-sub' not in kw['text'] + str(kw['blocks'])
         self.posts.append(kw['blocks'])
-        self.history.insert(0, {'ts': '9999999999.0', 'text': kw['text'], 'metadata': kw['metadata']})
+        self.history.insert(0, {'ts': '9999999999.0', 'text': kw['text'], 'metadata': kw['metadata'],
+                                'blocks': kw['blocks']})
+
+    def chat_update(self, **kw):
+        self.edits.append(kw['blocks'])
+        for m in self.history:
+            if m['ts'] == kw['ts']:
+                m['blocks'] = kw['blocks']
 
     def users_list(self, **kw):
         return {'members': []}
 
 
+ACTIVITY = []
+
+
 def _patch_io(monkeypatch):
+    ACTIVITY.clear()
     sub = {'id': '181525873848', 'properties': dict(CONTACT, recent_conversion_event_name='WSIA 2026 Meeting Form')}
     monkeypatch.setattr(fw, 'search_submissions', lambda hs, now: [sub])
     monkeypatch.setattr(fw, 'contact_meetings', lambda hs, cid: [])
     monkeypatch.setattr(fw, 'owner_info', lambda hs, oid: ('Mike', 'Mike Harris'))
     monkeypatch.setattr(fw, 'upsert_form_row', lambda payload: 'noop')
+    monkeypatch.setattr(fw, 'contact_activities', lambda hs, cid: ACTIVITY)
     fw._POSTED.clear()
 
 
@@ -126,3 +138,35 @@ def test_run_once_never_posts_when_history_unreadable(monkeypatch):
     slack = _FakeSlack([])
     c = fw.run_once(hs={'Authorization': 'x'}, slack=slack, channel='C', detect_conference=lambda n: 'wsia_uw_summit')
     assert slack.posts == [] and c['posted'] == 0
+
+
+def test_pick_outreach_outbound_after_submission_only():
+    sub = 1791464093513  # 2026-10-08 12:54 UTC
+    acts = [('emails', {'hs_timestamp': '2026-10-12T18:45:44Z', 'hs_email_direction': 'INCOMING_EMAIL'}),
+            ('calls', {'hs_timestamp': '2026-09-08T18:45:35Z'}),
+            ('emails', {'hs_timestamp': '2026-10-12T18:45:44Z', 'hs_email_direction': 'EMAIL',
+                        'hs_email_subject': 'FurtherAI meet up @ WSIA', 'hubspot_owner_id': '162894707'})]
+    o = fw.pick_outreach(acts, sub)
+    assert o == {'when': '10/12', 'what': 'email: FurtherAI meet up @ WSIA', 'owner_id': '162894707'}
+    assert fw.pick_outreach(acts[:2], sub) is None
+
+
+def test_post_is_edited_in_place_when_ae_reaches_out(monkeypatch):
+    _patch_io(monkeypatch)
+    slack = _FakeSlack([{'ts': '1791000000.0', 'text': 'older chatter'}])
+    run = lambda: fw.run_once(hs={'Authorization': 'x'}, slack=slack, channel='C',
+                              detect_conference=lambda n: 'wsia_uw_summit')
+    run()
+    assert 'No meeting yet' in str(slack.posts[0]) and slack.edits == []
+    ACTIVITY.append(('emails', {'hs_timestamp': '2026-10-12T18:45:44Z', 'hs_email_direction': 'EMAIL',
+                                'hs_email_subject': 'FurtherAI meet up @ WSIA'}))
+    c = run()
+    assert c['edited'] == 1 and len(slack.posts) == 1
+    assert 'Mike reached out 10/12 (email: FurtherAI meet up @ WSIA)' in str(slack.edits[0])
+    assert run()['edited'] == 0  # unchanged state → no further edits
+
+
+def test_slack_rewritten_text_counts_as_unchanged():
+    raw = '*Daniel Moler*, VP @ Sompo P&C\ndmoler@sompo-intl.com'
+    stored = '*Daniel Moler*, VP @ Sompo P&amp;C\n<mailto:dmoler@sompo-intl.com|dmoler@sompo-intl.com>'
+    assert fw._norm(raw) == fw._norm(stored)

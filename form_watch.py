@@ -146,8 +146,9 @@ def merge_form_row(header_row, current, payload, last_col):
     return merged, changed
 
 
-def contact_block(*, contact, ae_mention, meeting):
-    """One contact's lines in the channel post (no internal ids)."""
+def contact_block(*, contact, ae_mention, meeting, outreach=None):
+    """One contact's lines in the channel post (no internal ids). State, best first:
+    meeting on the calendar > AE reached out (outreach = {'who','when','what'}) > nudge."""
     assert isinstance(contact, dict)
     assert meeting is None or isinstance(meeting, dict)
     name = ' '.join(filter(None, [contact.get('firstname'), contact.get('lastname')])) or 'Unknown'
@@ -159,6 +160,10 @@ def contact_block(*, contact, ae_mention, meeting):
         start = mp.get('hs_meeting_start_time')
         when = f'{sheet_sync._fmt_date(start)} {sheet_sync._fmt_time(start)}'
         lines.append(f":calendar: On the calendar: {mp.get('hs_meeting_title') or 'meeting'}, {when}")
+    elif outreach:
+        what = f" ({outreach['what']})" if outreach.get('what') else ''
+        lines.append(f":white_check_mark: {outreach.get('who') or 'AE'} reached out {outreach.get('when', '')}{what}."
+                     ' Waiting on a meeting.')
     else:
         lines.append(f':warning: No meeting yet. {ae_mention or "AE"} please reach out to schedule.')
     return '\n'.join(lines)
@@ -287,13 +292,53 @@ def owner_info(hs, owner_id):
     return first, ' '.join(filter(None, [first, (d.get('lastName') or '').strip()]))
 
 
-def slack_id_by_name(slack, full_name):
-    """Exact real_name match (the bot token lacks users:read.email)."""
+def pick_outreach(activities, submitted_ms):
+    """Latest outbound email/call logged after the submission, else None.
+    activities: [(kind, properties)] with kind 'emails' | 'calls'."""
+    assert isinstance(activities, list)
+    assert isinstance(submitted_ms, int)
+    best = None
+    for kind, p in activities[:MAX_MEETINGS * 2]:
+        if kind == 'emails' and (p.get('hs_email_direction') or '') != 'EMAIL':
+            continue  # only emails we sent, not replies in
+        dt = sheet_sync._to_dt(p.get('hs_timestamp'))
+        if not dt or int(dt.timestamp() * 1000) < submitted_ms:
+            continue
+        if best is None or dt > best[0]:
+            best = (dt, kind, p)
+    if not best:
+        return None
+    dt, kind, p = best
+    what = f"email: {p['hs_email_subject']}" if kind == 'emails' and p.get('hs_email_subject') else kind[:-1]
+    return {'when': sheet_sync._fmt_date(dt.isoformat()), 'what': what, 'owner_id': p.get('hubspot_owner_id')}
+
+
+def contact_activities(hs, contact_id):
+    """[(kind, properties)] for the contact's logged emails and calls."""
+    assert contact_id
+    out = []
+    for kind, props in (('emails', 'hs_timestamp,hs_email_direction,hs_email_subject,hubspot_owner_id'),
+                        ('calls', 'hs_timestamp,hubspot_owner_id')):
+        r = requests.get(f'https://api.hubapi.com/crm/v4/objects/contacts/{contact_id}/associations/{kind}',
+                         headers=hs, timeout=15)
+        ids = [str(a['toObjectId']) for a in r.json().get('results', [])][-MAX_MEETINGS:] if r.ok else []
+        if not ids:
+            continue
+        r = requests.post(f'https://api.hubapi.com/crm/v3/objects/{kind}/batch/read', headers=hs, timeout=15,
+                          json={'inputs': [{'id': i} for i in ids], 'properties': props.split(',')})
+        out += [(kind, x.get('properties') or {}) for x in (r.json().get('results', []) if r.ok else [])]
+    return out
+
+
+def slack_id_by_name(slack, full_name, cache):
+    """Exact real_name match (the bot token lacks users:read.email). `cache`
+    holds the member list for one poll so we call users.list at most once."""
     if not full_name:
         return None
-    resp = slack.users_list(limit=500)
+    if 'members' not in cache:
+        cache['members'] = slack.users_list(limit=500).get('members', [])
     want = full_name.strip().lower()
-    for u in resp.get('members', []):
+    for u in cache['members']:
         if not u.get('deleted') and (u.get('real_name') or '').strip().lower() == want:
             return u['id']
     return None
@@ -303,10 +348,11 @@ _POSTED = set()  # keys this process has posted — survives a failed history re
 
 
 def posted_keys(slack, channel, since_ts):
-    """(dedup keys already in the channel since `since_ts`, messages scanned).
+    """(dedup keys in the channel since `since_ts`, messages scanned, our posts as
+    [{'ts', 'keys', 'blocks'}] so later polls can edit them in place).
     No `oldest` param: Slack intermittently returns zero messages with it, which
     made every poll repost (2026-10-12). Page newest-first and stop at since_ts."""
-    keys, cursor, scanned = set(), None, 0
+    keys, cursor, scanned, posts = set(), None, 0, []
     for _ in range(HISTORY_LIMIT // 200):
         kw = {'channel': channel, 'limit': 200, 'include_all_metadata': True,
               **({'cursor': cursor} if cursor else {})}
@@ -317,14 +363,16 @@ def posted_keys(slack, channel, since_ts):
             keys.update(KEY_RE.findall(m.get('text') or ''))
             meta = m.get('metadata') or {}
             if meta.get('event_type') == META_TYPE:
-                keys.update(k for k in (meta.get('event_payload') or {}).get('keys', [])[:MAX_CONTACTS]
-                            if KEY_RE.fullmatch(str(k)))
+                mk = [str(k) for k in (meta.get('event_payload') or {}).get('keys', [])[:MAX_BLOCKS]
+                      if KEY_RE.fullmatch(str(k))]
+                keys.update(mk)
+                posts.append({'ts': m['ts'], 'keys': mk, 'blocks': m.get('blocks') or []})
         if not msgs or float(msgs[-1]['ts']) < since_ts:
             break
         cursor = (resp.get('response_metadata') or {}).get('next_cursor')
         if not cursor:
             break
-    return keys, scanned
+    return keys, scanned, posts
 
 
 def upsert_form_row(payload):
@@ -354,7 +402,9 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
     now = now or time.time()
     counts = {'seen': 0, 'posted': 0, 'rows': 0, 'skipped': 0}
     subs = search_submissions(hs, now)
-    seen_keys, scanned = posted_keys(slack, channel, now - (LOOKBACK_DAYS + 1) * 86400) if subs else (set(), 0)
+    seen_keys, scanned, posts = posted_keys(slack, channel, now - (LOOKBACK_DAYS + 1) * 86400) \
+        if subs else (set(), 0, [])
+    users, current = {}, {}  # one users.list per poll; key → (conference, freshest contact block)
     seen_keys |= _POSTED
     if subs and scanned == 0:
         post = False  # can't prove what's already posted — never guess, never spam
@@ -371,23 +421,61 @@ def run_once(*, hs, slack, channel, detect_conference, now=None, post=True):
         if not (conference and sub_dt):
             counts['skipped'] += 1
             continue
-        meeting = pick_meeting(contact_meetings(hs, c['id']), int(sub_dt.timestamp() * 1000))
+        sub_ms = int(sub_dt.timestamp() * 1000)
+        meeting = pick_meeting(contact_meetings(hs, c['id']), sub_ms)
         ae_first, ae_full = owner_info(hs, p.get('hubspot_owner_id'))
+        outreach = None if meeting else pick_outreach(contact_activities(hs, c['id']), sub_ms)
+        if outreach:
+            same = str(outreach.get('owner_id') or '') == str(p.get('hubspot_owner_id') or '')
+            outreach['who'] = ae_first if same else (owner_info(hs, outreach.get('owner_id'))[0] or ae_first)
         payload = build_row(conference=conference, contact=p, ae_name=ae_first,
                             form_name=form_name, meeting=meeting)
         action = upsert_form_row(payload)
         counts['rows'] += action in ('inserted', 'updated')
         key = dedup_key(c['id'], sub_dt.strftime('%Y-%m-%dT%H:%M:%S'))
+        uid = slack_id_by_name(slack, ae_full, users) if post else None
+        block = contact_block(contact=p, ae_mention=f'<@{uid}>' if uid else ae_first,
+                              meeting=meeting, outreach=outreach)
+        current[key] = block
         if post and key not in seen_keys:
-            uid = slack_id_by_name(slack, ae_full)
-            block = contact_block(contact=p, ae_mention=f'<@{uid}>' if uid else ae_first, meeting=meeting)
             pending.setdefault(conference, []).append((key, block))
             seen_keys.add(key)
     for conference, items in pending.items():
         for i in range(0, len(items), MAX_BLOCKS):
             _post(slack, channel, conference, items[i:i + MAX_BLOCKS])
             counts['posted'] += len(items[i:i + MAX_BLOCKS])
+    counts['edited'] = refresh_posts(slack, channel, posts, current) if post else 0
     return counts
+
+
+def _norm(text):
+    """Undo Slack's storage rewrites (&amp;, <mailto:x|x>, <http..|label>) so an
+    unchanged block compares equal and we don't re-edit every poll."""
+    assert isinstance(text, str)
+    t = re.sub(r'<(?:mailto:|https?://)[^|>]*\|([^>]*)>', r'\1', text)
+    return t.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').strip()
+
+
+def refresh_posts(slack, channel, posts, current):
+    """Edit earlier posts in place when a contact's state changed (AE reached out,
+    meeting booked). Contacts we can't re-read keep their old text."""
+    assert isinstance(posts, list)
+    assert isinstance(current, dict)
+    edited = 0
+    for msg in posts[:HISTORY_LIMIT]:
+        old = [b['text']['text'] for b in msg['blocks'] if b.get('type') == 'section'][1:]
+        if not msg['keys'] or len(old) != len(msg['keys']):
+            continue  # not our block layout (e.g. hand-edited) — leave it alone
+        new = [current.get(k, o) for k, o in zip(msg['keys'], old)]
+        if [_norm(x) for x in new] == [_norm(x) for x in old]:
+            continue
+        title = msg['blocks'][0]['text']['text'].strip('*')
+        conference = title.split(':')[0]
+        slack.chat_update(channel=channel, ts=msg['ts'], text=title,
+                          blocks=slack_blocks(conference, new),
+                          metadata={'event_type': META_TYPE, 'event_payload': {'keys': msg['keys']}})
+        edited += 1
+    return edited
 
 
 def _post(slack, channel, conference, items):
