@@ -2540,6 +2540,40 @@ def exec_attach_query(now_ms):
             "sorts": [{"propertyName": "hs_meeting_start_time", "direction": "ASCENDING"}], "limit": 100}
 
 
+def _exec_attach_one(vp, m):
+    """Attach the freer exec to one meeting's synced event (idempotent)."""
+    mid = m.get('id')
+    if not mid or mid in _ATTACH_DONE:
+        return
+    p = m.get('properties', {})
+    event_id, organizer = vp.decode_event_url(p.get('hs_meeting_external_url'))
+    if not (event_id and organizer):
+        return
+    jt, emp, seg = _meeting_icp_fields(mid)
+    if not vp.exec_attach_ok(jt, emp, seg):
+        _ATTACH_DONE.add(mid)                    # not a target — don't recheck
+        return
+    if vp.event_has_exec(organizer, event_id):
+        _ATTACH_DONE.add(mid)                    # already covered
+        return
+    start_iso = p.get('hs_meeting_start_time')
+    busy = ({w: (vp.freebusy(w, start_iso, start_iso) or 0) for w in ('aman', 'zac')}
+            if start_iso else {'aman': 0, 'zac': 0})
+    who = vp.pick_exec(busy)
+    # Sweep has its own dry-run flag so we can observe it while the nudge stays live.
+    if os.environ.get('VP_EXEC_ATTACH_DRYRUN', '1') != '0':
+        print(f"[exec-attach][dry-run] would add {who} to event {event_id} "
+              f"org={organizer} mtg={mid} title={p.get('hs_meeting_title')}", flush=True)
+        _ATTACH_DONE.add(mid)                    # log once per process
+        return
+    res = vp.add_guest(event_id, who, calendar_id=organizer)
+    if res.get('performed') or res.get('reason') == 'already_present':
+        _ATTACH_DONE.add(mid)
+        print(f"[exec-attach] added {who} to event {event_id} mtg={mid}", flush=True)
+    else:
+        print(f"[exec-attach] add failed {who} event={event_id} mtg={mid}: {res}", flush=True)
+
+
 def exec_attach_pass(client):
     """One sweep: for upcoming demo/conference meetings whose Google invite has synced,
     add the freer exec to the real event (deterministic id from external_url; no search)."""
@@ -2551,36 +2585,13 @@ def exec_attach_pass(client):
         print(f'[exec-attach] search failed {r.status_code}', flush=True)
         return
     for m in r.json().get('results', [])[:100]:     # bounded
-        mid = m.get('id')
-        if not mid or mid in _ATTACH_DONE:
-            continue
-        p = m.get('properties', {})
-        event_id, organizer = vp.decode_event_url(p.get('hs_meeting_external_url'))
-        if not (event_id and organizer):
-            continue
-        jt, emp, seg = _meeting_icp_fields(mid)
-        if not vp.exec_attach_ok(jt, emp, seg):
-            _ATTACH_DONE.add(mid)                    # not a target — don't recheck
-            continue
-        if vp.event_has_exec(organizer, event_id):
-            _ATTACH_DONE.add(mid)                    # already covered
-            continue
-        start_iso = p.get('hs_meeting_start_time')
-        busy = ({w: (vp.freebusy(w, start_iso, start_iso) or 0) for w in ('aman', 'zac')}
-                if start_iso else {'aman': 0, 'zac': 0})
-        who = vp.pick_exec(busy)
-        # Sweep has its own dry-run flag so we can observe it while the nudge stays live.
-        if os.environ.get('VP_EXEC_ATTACH_DRYRUN', '1') != '0':
-            print(f"[exec-attach][dry-run] would add {who} to event {event_id} "
-                  f"org={organizer} mtg={mid} title={p.get('hs_meeting_title')}", flush=True)
-            _ATTACH_DONE.add(mid)                    # log once per process
-            continue
-        res = vp.add_guest(event_id, who, calendar_id=organizer)
-        if res.get('performed') or res.get('reason') == 'already_present':
-            _ATTACH_DONE.add(mid)
-            print(f"[exec-attach] added {who} to event {event_id} mtg={mid}", flush=True)
-        else:
-            print(f"[exec-attach] add failed {who} event={event_id} mtg={mid}: {res}", flush=True)
+        try:
+            _exec_attach_one(vp, m)
+        except Exception as e:
+            # One unreachable event (e.g. 403 on an organizer's calendar) must not
+            # abort the pass — that stalled every meeting sorted after it.
+            _ATTACH_DONE.add(m.get('id'))
+            print(f"[exec-attach] skip mtg={m.get('id')}: {e}", flush=True)
 
 
 def exec_attach_loop():

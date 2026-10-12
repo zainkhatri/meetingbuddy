@@ -26,3 +26,21 @@ def test_windows_on_start_time_not_create_date():
 def test_still_requires_synced_invite():
     f = _filters(meeting_bot.exec_attach_query(0))
     assert f["hs_meeting_external_url"]["operator"] == "HAS_PROPERTY"
+
+
+def test_one_bad_event_does_not_stall_the_pass(monkeypatch):
+    """A 403 on one organizer's calendar used to abort the pass, so meetings after it never ran."""
+    import types
+    seen = []
+
+    def fake_one(vp, m):
+        seen.append(m["id"])
+        if m["id"] == "bad":
+            raise RuntimeError("403 Forbidden")
+
+    resp = types.SimpleNamespace(ok=True, json=lambda: {"results": [{"id": "bad"}, {"id": "good"}]})
+    monkeypatch.setattr(meeting_bot, "_exec_attach_one", fake_one)
+    monkeypatch.setattr(meeting_bot.requests, "post", lambda *a, **k: resp)
+    meeting_bot.exec_attach_pass(None)
+    assert seen == ["bad", "good"]
+    assert "bad" in meeting_bot._ATTACH_DONE
