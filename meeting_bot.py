@@ -38,7 +38,6 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 import sheet_sync
 import attribution
-from claim_logic import claim_decision, SDR_SLACK, SDR_SLACK_REV, claim_cap, count_company_rows, mark_claimed
 import blitz_calendar  # calendar-sourced AE blitz leaderboard; inert unless BLITZ_CHANNEL_ID + BLITZ_AES set
 import calendar_credit
 import invite_sweep  # re-reads invites so the AE on the demo owns the deal
@@ -734,36 +733,6 @@ def hs_find_open_deal(company_id, contact_id):
     return None
 
 
-# Recycling guard: a company with a deal in any of these stages is actively
-# worked/owned and must never be recycled (Gavin, 2026-09-21) — the open pipeline
-# stages plus closed-won. Enforced at claim time as a safety net behind the
-# digest's own eligibility filter.
-DEAL_COVERED_STAGES = DEAL_OPEN_STAGES + ['closedwon']
-
-
-def hs_company_has_covered_deal(company_id):
-    """True if the company has any deal in an open or closed-won stage. Such an
-    account is excluded from recycling. Returns None on API error so the caller
-    can distinguish 'no covered deal' (False) from 'couldn't check' (None) and
-    avoid handing out a covered account on a transient CRM hiccup."""
-    if not company_id:
-        return False
-    body = {'filterGroups': [{'filters': [
-                {'propertyName': 'associations.company', 'operator': 'EQ', 'value': str(company_id)},
-                {'propertyName': 'pipeline', 'operator': 'EQ', 'value': DEAL_PIPELINE},
-                {'propertyName': 'dealstage', 'operator': 'IN', 'values': DEAL_COVERED_STAGES},
-            ]}],
-            'properties': ['dealstage'], 'limit': 1}
-    try:
-        r = requests.post('https://api.hubapi.com/crm/v3/objects/deals/search',
-                          headers=HS, json=body, timeout=30)
-        if not r.ok:
-            return None
-        return bool(r.json().get('total', 0))
-    except Exception as e:
-        print(f'[claim] deal-cover check failed for {company_id}: {e}', flush=True)
-        return None
-
 
 def hs_create_scheduled_deal(company_name, company_id,
                              contact_id, bdr_owner_id, meeting_id):
@@ -1310,120 +1279,13 @@ def _is_conference_reply(event, ts):
     return bool(tt) and tt != ts and event.get('channel') == CONFERENCE_MEETINGS_CHANNEL
 
 
-_CLAIM_LOCKS = {}
-_CLAIM_LOCKS_GUARD = threading.Lock()
-
-def _claim_lock(cid):
-    with _CLAIM_LOCKS_GUARD:
-        return _CLAIM_LOCKS.setdefault(cid, threading.Lock())
-
-_BDR_LOCKS = {}
-_BDR_GUARD = threading.Lock()
-_WEEK_COUNT = {}          # sdr -> claims counted this rolling week (in-process; race-free vs search lag)
-
-def _bdr_lock(sdr):
-    with _BDR_GUARD:
-        return _BDR_LOCKS.setdefault(sdr, threading.Lock())
-
-def weekly_claim_count(sdr):
-    """Source-of-truth cap: accounts this BDR claimed in the last 7 days, counted from
-    HubSpot (cross-message, cross-digest, race-resistant) — not from the Slack message."""
-    cutoff_ms = int((time.time() - 7 * 86400) * 1000)
-    body = {'filterGroups': [{'filters': [
-                {'propertyName': 'last_claim_by', 'operator': 'EQ', 'value': sdr},
-                {'propertyName': 'recycle_status', 'operator': 'EQ', 'value': 'active'},
-                {'propertyName': 'claim_date', 'operator': 'GTE', 'value': cutoff_ms}]}],
-            'limit': 1}
-    r = requests.post('https://api.hubapi.com/crm/v3/objects/companies/search',
-                      headers=HS, json=body, timeout=30)
-    return r.json().get('total', 0) if (r is not None and r.ok) else 0
-
-def create_claim_note(cid, prev, sdr):
-    """Log the claim on the company's HubSpot timeline (audit trail). Best-effort."""
-    body = {'properties': {
-                'hs_note_body': ('♻️ Account recycling: SDR ownership claimed by ' + sdr
-                                 + (f' (from {prev})' if prev else '') + ' via the weekly up-for-grabs digest.'),
-                'hs_timestamp': int(time.time() * 1000)},
-            'associations': [{'to': {'id': cid},
-                'types': [{'associationCategory': 'HUBSPOT_DEFINED', 'associationTypeId': 190}]}]}
-    try:
-        requests.post('https://api.hubapi.com/crm/v3/objects/notes', headers=HS, json=body, timeout=30)
-    except Exception as e:
-        print(f'[claim] note log failed: {e}', flush=True)
-
 @app.action('claim_account')
 def handle_claim_account(ack, body, client, action):
+    """Account claiming is retired (2026-10-27): old #sales posts still carry the button."""
     ack()
-    cid = str(action['value'])
-    uid = body['user']['id']
-    ch  = body['channel']['id']
-    sdr = SDR_SLACK.get(uid)
-    if not sdr:
-        client.chat_postEphemeral(channel=ch, user=uid,
-                                  text="Only BDRs can claim these — this is BDR account recycling.")
-        return
-    # even-split cap: each BDR may claim ceil(digest_size / NBDRS) per rolling week. Cap value comes
-    # from the digest they're viewing; used-count is tracked in-process under a per-BDR lock
-    # (seeded once from HubSpot) so rapid clicks can't race the search index.
-    msg  = body.get('message', {})
-    ts   = msg.get('ts')
-    orig = msg.get('blocks', [])
-    cap  = claim_cap(count_company_rows(orig))
-    def _update(blocks):
-        try:
-            client.chat_update(channel=ch, ts=ts, blocks=blocks, text=msg.get('text', 'Up for grabs this week'))
-        except Exception as e:
-            print(f'[claim] chat_update failed: {e}', flush=True)
-    with _bdr_lock(sdr):                                     # serialize a BDR's clicks (cap is race-free)
-        if sdr not in _WEEK_COUNT:
-            _WEEK_COUNT[sdr] = weekly_claim_count(sdr)       # seed once, then count in memory
-        if _WEEK_COUNT[sdr] >= cap:
-            client.chat_postEphemeral(channel=ch, user=uid,
-                text=f"You've hit your claim limit for this week ({cap}). More open up next Monday.")
-            return
-        # optimistic: grey the row NOW so it's unclickable instantly (no double-clicks during the swap)
-        _update(mark_claimed(orig, cid, sdr))
-        with _claim_lock(cid):                               # settle two BDRs racing the same account
-            r = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
-                             params={'properties': 'name,sdr_owner,recycle_status,last_claim_by'}, timeout=30)
-            if not r or not r.ok:
-                _update(orig)                                # restore button — account still available
-                client.chat_postEphemeral(channel=ch, user=uid, text="Couldn't reach the CRM — try again."); return
-            props = r.json().get('properties', {})
-            ok, payload = claim_decision(props, sdr)
-            if not ok:
-                # already claimed / self — keep greyed, but show the true owner's name
-                true_owner = (props.get('last_claim_by') or props.get('sdr_owner') or sdr).strip() or sdr
-                _update(mark_claimed(orig, cid, true_owner))
-                client.chat_postEphemeral(channel=ch, user=uid, text=payload['reason']); return
-            # Exclude accounts with an open or closed-won deal — they're actively
-            # worked and not up for grabs (Gavin, 2026-09-21). Safety net behind the
-            # digest filter; on a CRM hiccup (None) we don't hand out the account.
-            covered = hs_company_has_covered_deal(cid)
-            if covered or covered is None:
-                _update(orig)                                # restore button — account not claimed
-                msg_txt = ("That account has an open or closed-won deal — it's excluded from recycling."
-                           if covered else "Couldn't verify deal status — try again.")
-                client.chat_postEphemeral(channel=ch, user=uid, text=msg_txt); return
-            # claim_decision already sets recycle_status='active' in the payload — that IS
-            # the post-claim lifecycle state (clock-eligible like warm), so no extra clear.
-            pr = requests.patch(f'https://api.hubapi.com/crm/v3/objects/companies/{cid}', headers=HS,
-                                json={'properties': payload}, timeout=30)
-            if not pr or not pr.ok:
-                _update(orig)                                # restore button — save failed
-                client.chat_postEphemeral(channel=ch, user=uid, text="Claim failed to save — try again."); return
-            _WEEK_COUNT[sdr] += 1                            # count only a confirmed claim
-    name = props.get('name') or cid                         # public greyed row is the confirmation; no ephemeral
-    create_claim_note(cid, payload['claimed_from'], sdr)     # log the claim on the HubSpot timeline
-    # DM the previous owner, if we can map them
-    prev = payload['claimed_from']
-    prev_uid = SDR_SLACK_REV.get(prev)
-    if prev_uid:
-        try:
-            client.chat_postMessage(channel=prev_uid,
-                text=f"{sdr} claimed *{name}* from you — it was 30+ days cold.")
-        except Exception as e:
-            print(f'[claim] old-owner DM failed: {e}', flush=True)
+    client.chat_postEphemeral(channel=body['channel']['id'], user=body['user']['id'],
+                              text="Account claiming is retired. Ownership doesn't change from Slack; "
+                                   "if you need more accounts, ask Kushal or Zac.")
 
 
 @app.event('message')
