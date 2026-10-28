@@ -261,17 +261,23 @@ def hs_find_contact(first, last, email=None, company_name=None):
     return attribution.find_contact(HS, first, last, email, company_name)
 
 
-def hs_find_company(name):
-    if not name:
+def hs_lookup_contact(first, last, email=None, company_name=None):
+    """(contact, ambiguous) — see attribution.lookup_contact. Raises if the
+    HubSpot search fails; the caller must then skip creating a contact."""
+    return attribution.lookup_contact(HS, first, last, email, company_name)
+
+
+def hs_find_company(name, email=None):
+    """Existing company: email domain first (free-mail skipped), then
+    normalized name (case, punctuation, legal suffix ignored). Never creates.
+    Raises if the HubSpot search fails."""
+    if not (name or email):
         return None
-    body = {'filterGroups': [{'filters': [{'propertyName': 'name', 'operator': 'EQ', 'value': name}]}],
-            'properties': ['name', 'hubspot_owner_id'], 'limit': 1}
-    r = requests.post('https://api.hubapi.com/crm/v3/objects/companies/search', headers=HS, json=body, timeout=30)
-    rs = r.json().get('results', [])
-    return rs[0] if rs else None
+    return attribution.find_company(HS, name, email)
 
 
-def hs_create_contact(first, last, title, company_name, email=None, linkedin=None, owner_id=None):
+def hs_create_contact(first, last, title, company_name, email=None, linkedin=None, owner_id=None,
+                      company_id=None):
     props = {}
     if first: props['firstname'] = first
     if last: props['lastname'] = last
@@ -284,6 +290,9 @@ def hs_create_contact(first, last, title, company_name, email=None, linkedin=Non
     if sdr_val:
         props['sdr_owner'] = sdr_val
     body = {'properties': props}
+    if company_id:  # born associated to the matched company
+        body['associations'] = [{'to': {'id': company_id}, 'types': [
+            {'associationCategory': 'HUBSPOT_DEFINED', 'associationTypeId': 279}]}]
     r = requests.post('https://api.hubapi.com/crm/v3/objects/contacts', headers=HS, json=body, timeout=30)
     return r.json() if r.status_code in (200, 201) else None
 
@@ -1988,7 +1997,11 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
         return
 
     # 1. Find or create company
-    co = hs_find_company(company_name) if company_name else None
+    try:
+        co = hs_find_company(company_name, email) if (company_name or email) else None
+    except Exception as e:
+        print(f'[company] search failed, continuing without company: {company_name!r}: {e}', flush=True)
+        co = None
     company_id = co['id'] if co else None
     # Snapshot prior HubSpot footprint BEFORE any writes, so counts exclude the
     # meeting/deal we're about to create AND the contact we may create below.
@@ -1996,10 +2009,22 @@ def _process_booking(parsed, text, owner_id, ts, client, say, channel=None, post
     history = hs_company_history(company_id) if co else None
 
     # 2. Find or create contact (company disambiguates same-name collisions)
-    contact = hs_find_contact(first, last, email, company_name)
-    if not contact and (first or last or email):
+    # A failed search or an ambiguous same-name match must never create: that
+    # is exactly how duplicate contacts leaked in. Keep going without one.
+    search_failed = False
+    try:
+        contact, ambiguous = hs_lookup_contact(first, last, email, company_name)
+    except Exception as e:
+        print(f'[contact] search failed, not creating: {first} {last} <{email}>: {e}', flush=True)
+        contact, ambiguous, search_failed = None, False, True
+    if search_failed:
+        pass
+    elif not contact and ambiguous:
+        print(f'[contact] no unique match, not creating: {first} {last} @ {company_name!r}', flush=True)
+    elif not contact and (first or last or email):
         contact = hs_create_contact(first, last, parsed.get('contact_title'),
-                                     company_name, email, parsed.get('contact_linkedin'), owner_id)
+                                     company_name, email, parsed.get('contact_linkedin'), owner_id,
+                                     company_id=company_id)
     contact_id = contact['id'] if contact else None
     if contact_id:
         hs_set_contact_sdr_owner(contact_id, owner_id)
