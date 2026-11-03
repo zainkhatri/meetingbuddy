@@ -2377,54 +2377,66 @@ def _ea_to_int(v):
 
 
 def _meeting_icp_fields(meeting_id):
-    """(jobtitle, employees, segment) for a meeting's primary contact, from HubSpot."""
+    """(jobtitle, employees, segment, lifecyclestage) for a meeting's primary contact, from HubSpot."""
     try:
         a = requests.get(f'https://api.hubapi.com/crm/v4/objects/meetings/{meeting_id}/associations/contacts',
                          headers=HS, timeout=15)
         res = a.json().get('results', []) if a.ok else []
         if not res:
-            return (None, None, None)
+            return (None, None, None, None)
         cid = res[0].get('toObjectId') or res[0].get('id')
         c = requests.get(f'https://api.hubapi.com/crm/v3/objects/contacts/{cid}',
                          headers=HS, params={'properties': 'jobtitle'}, timeout=15)
         jt = (c.json().get('properties', {}) or {}).get('jobtitle') if c.ok else None
-        emp, seg = None, None
+        emp, seg, stage = None, None, None
         ca = requests.get(f'https://api.hubapi.com/crm/v4/objects/contacts/{cid}/associations/companies',
                           headers=HS, timeout=15)
         cres = ca.json().get('results', []) if ca.ok else []
         if cres:
             coid = cres[0].get('toObjectId') or cres[0].get('id')
             co = requests.get(f'https://api.hubapi.com/crm/v3/objects/companies/{coid}',
-                              headers=HS, params={'properties': 'numberofemployees,segment,type'}, timeout=15)
+                              headers=HS, params={'properties': 'numberofemployees,segment,type,lifecyclestage'}, timeout=15)
             cp = co.json().get('properties', {}) if co.ok else {}
             emp = _ea_to_int(cp.get('numberofemployees'))
             seg = cp.get('segment') or cp.get('type')
-        return (jt, emp, seg)
+            stage = cp.get('lifecyclestage')
+        return (jt, emp, seg, stage)
     except Exception as e:
         print(f'[exec-attach] icp-fields error mtg={meeting_id}: {e}', flush=True)
-        return (None, None, None)
+        return (None, None, None, None)
 
 
 _ATTACH_DONE = set()   # meeting ids handled this process (avoid re-querying every tick)
 
 
 def exec_attach_query(now_ms):
-    """HubSpot search body for the exec-attach sweep: synced demo/conference meetings
-    starting in the next 21 days. Keyed on START time, not create date — conference
-    meetings are booked weeks ahead, so a create-date window never saw them."""
+    """HubSpot search body for the exec-attach sweep: synced meetings starting in the
+    next 21 days that are typed demo/conference OR untyped. Aman's ask (9/16) is every
+    meeting with a VP+ ICP persona; most real prospect meetings never get a type, so a
+    demo/conference-only filter missed them. Untyped meetings get extra gates in
+    _exec_attach_one (not a customer, not a recurring invite). Keyed on START time."""
     lo = now_ms
     hi = now_ms + 21 * 86400 * 1000
-    # meeting_type is REQUIRED: without it the sweep matches every synced meeting
-    # (internal syncs, customer implementation sessions, check-ins) whose contact
-    # happens to be VP+ — and would add execs to all of them. Conference meetings
-    # (WSIA, ITC, ...) are typed 'conference', not 'demo', so both are included.
-    return {"filterGroups": [{"filters": [
-                {"propertyName": "hs_meeting_external_url", "operator": "HAS_PROPERTY"},
-                {"propertyName": "hs_meeting_start_time", "operator": "BETWEEN",
-                 "value": str(lo), "highValue": str(hi)},
-                {"propertyName": "meeting_type", "operator": "IN", "values": ["demo", "conference"]}]}],
-            "properties": ["hs_meeting_external_url", "hs_meeting_start_time", "hs_meeting_title"],
+    base = [{"propertyName": "hs_meeting_external_url", "operator": "HAS_PROPERTY"},
+            {"propertyName": "hs_meeting_start_time", "operator": "BETWEEN",
+             "value": str(lo), "highValue": str(hi)}]
+    # Other explicit types (customer, internal, ...) stay out on purpose.
+    return {"filterGroups": [
+                {"filters": base + [{"propertyName": "meeting_type", "operator": "IN",
+                                     "values": ["demo", "conference"]}]},
+                {"filters": base + [{"propertyName": "meeting_type", "operator": "NOT_HAS_PROPERTY"}]}],
+            "properties": ["hs_meeting_external_url", "hs_meeting_start_time",
+                           "hs_meeting_title", "meeting_type"],
             "sorts": [{"propertyName": "hs_meeting_start_time", "direction": "ASCENDING"}], "limit": 100}
+
+
+def _untyped_meeting_ok(vp, stage, organizer, event_id):
+    """Gate for meetings with no meeting_type: skip customers (weeklies, check-ins,
+    trainings) and recurring invites. Fails closed if the event can't be read."""
+    assert organizer and event_id, "caller must pass a decoded event"
+    if (stage or '').lower() == 'customer':
+        return False
+    return vp.event_is_recurring(organizer, event_id) is False
 
 
 def _exec_attach_one(vp, m):
@@ -2436,9 +2448,13 @@ def _exec_attach_one(vp, m):
     event_id, organizer = vp.decode_event_url(p.get('hs_meeting_external_url'))
     if not (event_id and organizer):
         return
-    jt, emp, seg = _meeting_icp_fields(mid)
+    jt, emp, seg, stage = _meeting_icp_fields(mid)
     if not vp.exec_attach_ok(jt, emp, seg):
         _ATTACH_DONE.add(mid)                    # not a target — don't recheck
+        return
+    if p.get('meeting_type') not in ('demo', 'conference') and \
+            not _untyped_meeting_ok(vp, stage, organizer, event_id):
+        _ATTACH_DONE.add(mid)                    # customer or recurring — not a target
         return
     if vp.event_has_exec(organizer, event_id):
         _ATTACH_DONE.add(mid)                    # already covered
@@ -2456,7 +2472,8 @@ def _exec_attach_one(vp, m):
     res = vp.add_guest(event_id, who, calendar_id=organizer)
     if res.get('performed') or res.get('reason') == 'already_present':
         _ATTACH_DONE.add(mid)
-        print(f"[exec-attach] added {who} to event {event_id} mtg={mid}", flush=True)
+        print(f"[exec-attach] added {who} to event {event_id} mtg={mid} "
+              f"type={p.get('meeting_type') or 'none'} title={p.get('hs_meeting_title')}", flush=True)
     else:
         print(f"[exec-attach] add failed {who} event={event_id} mtg={mid}: {res}", flush=True)
 
@@ -2466,12 +2483,20 @@ def exec_attach_pass(client):
     add the freer exec to the real event (deterministic id from external_url; no search)."""
     import vp_escalation as vp
     body = exec_attach_query(int(time.time() * 1000))
-    r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
-                      headers=HS, json=body, timeout=30)
-    if not r.ok:
-        print(f'[exec-attach] search failed {r.status_code}', flush=True)
-        return
-    for m in r.json().get('results', [])[:100]:     # bounded
+    results = []
+    for _ in range(5):                               # bounded: up to 500 meetings
+        r = requests.post('https://api.hubapi.com/crm/v3/objects/meetings/search',
+                          headers=HS, json=body, timeout=30)
+        if not r.ok:
+            print(f'[exec-attach] search failed {r.status_code}', flush=True)
+            break
+        data = r.json()
+        results += data.get('results', [])
+        after = (data.get('paging') or {}).get('next', {}).get('after')
+        if not after:
+            break
+        body = dict(body, after=after)
+    for m in results[:500]:
         try:
             _exec_attach_one(vp, m)
         except Exception as e:
@@ -2479,6 +2504,8 @@ def exec_attach_pass(client):
             # abort the pass — that stalled every meeting sorted after it.
             _ATTACH_DONE.add(m.get('id'))
             print(f"[exec-attach] skip mtg={m.get('id')}: {e}", flush=True)
+    # Heartbeat: the ARES watchdog redeploys if the logs go quiet (11/2 hang).
+    print(f"[heartbeat] exec-attach pass done, {len(results)} meetings", flush=True)
 
 
 def exec_attach_loop():

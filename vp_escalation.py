@@ -571,6 +571,25 @@ def event_has_exec(organizer_email: str, event_id: str) -> bool:
         return False
 
 
+def event_is_recurring(organizer_email: str, event_id: str) -> Optional[bool]:
+    """True if the event is an instance of a recurring series (weekly syncs,
+    monthly check-ins). None if it can't be read, so callers can fail closed."""
+    if not (organizer_email and event_id):
+        return None
+    try:
+        token = _gcal_token(subject=organizer_email)
+        if not token:
+            return None
+        import requests
+        r = requests.get(f"{_CAL_API}/calendars/{organizer_email}/events/{event_id}",
+                         headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        r.raise_for_status()
+        ev = r.json()
+        return bool(ev.get("recurringEventId") or ev.get("recurrence"))
+    except Exception:
+        return None
+
+
 # ── Retry queue: keep trying to add the exec until the GCal invite syncs ──────
 # The invite usually doesn't exist at Slack-post time, so a single attempt fails.
 # We enqueue and retry for ESCALATION_TTL_SEC. In-memory (Railway disk is

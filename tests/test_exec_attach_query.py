@@ -1,8 +1,8 @@
 import meeting_bot
 
 
-def _filters(body):
-    return {f["propertyName"]: f for f in body["filterGroups"][0]["filters"]}
+def _filters(body, group=0):
+    return {f["propertyName"]: f for f in body["filterGroups"][group]["filters"]}
 
 
 def test_includes_conference_meetings():
@@ -10,6 +10,38 @@ def test_includes_conference_meetings():
     f = _filters(meeting_bot.exec_attach_query(1_000_000_000_000))
     assert f["meeting_type"]["operator"] == "IN"
     assert set(f["meeting_type"]["values"]) == {"demo", "conference"}
+
+
+def test_includes_untyped_meetings():
+    """Most prospect meetings are never typed; Aman's ask covers every VP+ ICP meeting."""
+    body = meeting_bot.exec_attach_query(1_000_000_000_000)
+    assert len(body["filterGroups"]) == 2
+    f = _filters(body, 1)
+    assert f["meeting_type"]["operator"] == "NOT_HAS_PROPERTY"
+    assert f["hs_meeting_external_url"]["operator"] == "HAS_PROPERTY"
+    assert "meeting_type" in body["properties"]
+
+
+class _VP:
+    def __init__(self, recurring):
+        self.recurring = recurring
+
+    def event_is_recurring(self, org, eid):
+        return self.recurring
+
+
+def test_untyped_gate_skips_customers():
+    assert meeting_bot._untyped_meeting_ok(_VP(False), "customer", "o@x.com", "e1") is False
+
+
+def test_untyped_gate_skips_recurring_and_unreadable():
+    assert meeting_bot._untyped_meeting_ok(_VP(True), "lead", "o@x.com", "e1") is False
+    assert meeting_bot._untyped_meeting_ok(_VP(None), "lead", "o@x.com", "e1") is False
+
+
+def test_untyped_gate_allows_one_off_prospect():
+    assert meeting_bot._untyped_meeting_ok(_VP(False), "opportunity", "o@x.com", "e1") is True
+    assert meeting_bot._untyped_meeting_ok(_VP(False), None, "o@x.com", "e1") is True
 
 
 def test_windows_on_start_time_not_create_date():
