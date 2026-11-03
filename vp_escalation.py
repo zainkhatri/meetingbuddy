@@ -229,7 +229,7 @@ def add_guest(event_id: str, exec_name: str, calendar_id: Optional[str] = None) 
         # sticks. Caller copies the meeting onto the exec's calendar instead.
         return {**intent, "performed": False, "reason": "client_organized", "event": body}
     attendees = body.get("attendees", []) or []
-    if any((a.get("email", "").lower() == email.lower()) for a in attendees[:100]):
+    if any((a.get("email", "").lower() in _exec_emails(exec_name)) for a in attendees[:100]):
         return {**intent, "performed": False, "reason": "already_present"}  # idempotent
     attendees.append({"email": email, "optional": True, "responseStatus": "accepted"})
     patch = requests.patch(
@@ -306,6 +306,19 @@ def _exec_calendar(exec_name: str) -> str:
     assert exec_name in EXECS, f"unknown exec: {exec_name}"
     env = f"VP_EXEC_CAL_{exec_name.upper()}"
     return os.environ.get(env, f"{exec_name}@furtherai.com")
+
+
+_EXEC_ALIASES = {"aman": "ag@furtherai.com"}   # same Google account, older address
+
+
+def _exec_emails(exec_name: str) -> set:
+    """Every address an exec can show up under on an invite (calendar + aliases)."""
+    assert exec_name in EXECS, f"unknown exec: {exec_name}"
+    extra = os.environ.get(f"VP_EXEC_ALIASES_{exec_name.upper()}", _EXEC_ALIASES.get(exec_name, ""))
+    out = {_exec_calendar(exec_name).lower()}
+    out.update(a.strip().lower() for a in extra.split(",")[:10] if a.strip())
+    assert out, "exec must have at least one address"
+    return out
 
 
 def _gcal_token(subject: Optional[str] = None) -> Optional[str]:
@@ -625,9 +638,9 @@ def event_has_exec(organizer_email: str, event_id: str) -> bool:
         r = requests.get(f"{_CAL_API}/calendars/{organizer_email}/events/{event_id}",
                          headers={"Authorization": f"Bearer {token}"}, timeout=15)
         r.raise_for_status()
-        emails = " ".join((a.get("email", "") or "").lower()
-                          for a in r.json().get("attendees", []) or [])
-        return any(_exec_calendar(x).lower() in emails for x in EXECS)
+        emails = {(a.get("email", "") or "").lower()
+                  for a in (r.json().get("attendees", []) or [])[:200]}
+        return any(emails & _exec_emails(x) for x in EXECS)
     except Exception:
         return False
 

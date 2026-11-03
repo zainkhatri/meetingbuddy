@@ -68,3 +68,19 @@ def test_add_guest_hands_back_client_organized(monkeypatch):
     monkeypatch.setattr(requests, "patch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no patch")))
     r = vp.add_guest("evt", "aman", calendar_id="mike@furtherai.com")
     assert r["reason"] == "client_organized" and r["event"]["summary"] == _SRC["summary"]
+
+
+def test_aman_alias_counts_as_present(monkeypatch):
+    monkeypatch.setattr(vp, "_gcal_token", lambda subject=None: "tok")
+    ev = {"organizer": {"email": "nia@furtherai.com"}, "attendees": [{"email": "AG@furtherai.com"}]}
+    monkeypatch.setattr(requests, "get", lambda url, **k: _Resp(200, ev))
+    assert vp.event_has_exec("nia@furtherai.com", "evt") is True
+    monkeypatch.setenv("VP_ESCALATION_ENABLED", "1")
+    assert vp.add_guest("evt", "aman", calendar_id="nia@furtherai.com")["reason"] == "already_present"
+
+
+def test_alias_does_not_match_lookalike(monkeypatch):
+    monkeypatch.setattr(vp, "_gcal_token", lambda subject=None: "tok")
+    ev = {"attendees": [{"email": "rag@furtherai.com"}, {"email": "zachary@x.com"}]}
+    monkeypatch.setattr(requests, "get", lambda url, **k: _Resp(200, ev))
+    assert vp.event_has_exec("nia@furtherai.com", "evt") is False
