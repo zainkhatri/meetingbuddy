@@ -26,6 +26,7 @@ Runs Slack Socket Mode — no public URL needed.
 import os
 import random
 import re
+import sys
 import threading
 import time
 import json
@@ -2470,9 +2471,13 @@ def _exec_attach_one(vp, m):
         _ATTACH_DONE.add(mid)                    # log once per process
         return
     res = vp.add_guest(event_id, who, calendar_id=organizer)
+    verb = 'added'
+    if res.get('reason') == 'client_organized':
+        res = vp.copy_to_exec(res['event'], who, key=f'mtg{mid}')
+        who, verb = res.get('exec', who), 'copied (client invite)'
     if res.get('performed') or res.get('reason') == 'already_present':
         _ATTACH_DONE.add(mid)
-        print(f"[exec-attach] added {who} to event {event_id} mtg={mid} "
+        print(f"[exec-attach] {verb} {who} to event {event_id} mtg={mid} "
               f"type={p.get('meeting_type') or 'none'} title={p.get('hs_meeting_title')}", flush=True)
     else:
         print(f"[exec-attach] add failed {who} event={event_id} mtg={mid}: {res}", flush=True)
@@ -3126,6 +3131,21 @@ def form_watch_loop():
         time.sleep(interval)
 
 
+def _restart_in_place(code=0):
+    """Restart Python inside the same container (os.execv) instead of exiting.
+    A container restart remounts the Railway volume, and on 11/2 that remount hung
+    and the bot never came back. Falls back to exiting if exec fails."""
+    assert code in (0, 1), 'exit code must be 0 or 1'
+    assert sys.executable, 'need an interpreter path to re-exec'
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, '-u'] + sys.argv)
+    except OSError as e:
+        print(f'[restart] execv failed ({e}), exiting instead', flush=True)
+    os._exit(code)
+
+
 def periodic_restart(interval_seconds=1800):
     # Unconditional restart every 30 min. Most reliable defense against
     # any future "socket up, events stopped" failure mode we haven't yet
@@ -3135,8 +3155,8 @@ def periodic_restart(interval_seconds=1800):
     left = _wait_for_pending_invites()
     if left:
         print(f'[periodic-restart] {left} invite offer(s) still pending after wait', flush=True)
-    print(f'[periodic-restart] {interval_seconds}s elapsed — exiting for clean restart')
-    os._exit(0)
+    print(f'[periodic-restart] {interval_seconds}s elapsed — restarting in place', flush=True)
+    _restart_in_place(0)
 
 
 # NOTE: removed event_flow_watchdog. It killed the bot every ~10 min because
@@ -3162,8 +3182,8 @@ def slack_rest_watchdog():
             print(f'[rest-watchdog] auth.test errored: {e}')
             ok = False
         if not ok:
-            print('[rest-watchdog] Slack REST unreachable — exiting for clean restart')
-            os._exit(0)
+            print('[rest-watchdog] Slack REST unreachable — restarting in place', flush=True)
+            _restart_in_place(0)
 
 
 def socket_watchdog(handler, max_disconnected_seconds=120):
@@ -3190,8 +3210,8 @@ def socket_watchdog(handler, max_disconnected_seconds=120):
             continue
         elapsed = now - disconnected_since
         if elapsed >= max_disconnected_seconds:
-            print(f'[watchdog] socket dead for {int(elapsed)}s — exiting so Railway restarts')
-            os._exit(1)
+            print(f'[watchdog] socket dead for {int(elapsed)}s — restarting in place', flush=True)
+            _restart_in_place(1)
 
 
 if __name__ == '__main__':

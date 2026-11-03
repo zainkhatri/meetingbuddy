@@ -222,7 +222,13 @@ def add_guest(event_id: str, exec_name: str, calendar_id: Optional[str] = None) 
     ev = requests.get(f"{_CAL_API}/calendars/{cal}/events/{event_id}",
                       headers=hdr, timeout=15)
     ev.raise_for_status()
-    attendees = ev.json().get("attendees", []) or []
+    body = ev.json()
+    org_email = ((body.get("organizer") or {}).get("email") or "").lower()
+    if org_email and not org_email.endswith("@furtherai.com"):
+        # Client owns the invite: a patch only lands on our rep's copy and never
+        # sticks. Caller copies the meeting onto the exec's calendar instead.
+        return {**intent, "performed": False, "reason": "client_organized", "event": body}
+    attendees = body.get("attendees", []) or []
     if any((a.get("email", "").lower() == email.lower()) for a in attendees[:100]):
         return {**intent, "performed": False, "reason": "already_present"}  # idempotent
     attendees.append({"email": email, "optional": True, "responseStatus": "accepted"})
@@ -232,6 +238,61 @@ def add_guest(event_id: str, exec_name: str, calendar_id: Optional[str] = None) 
         json={"attendees": attendees}, timeout=15)
     patch.raise_for_status()
     return {**intent, "performed": True, "reason": "added"}
+
+
+def _join_link(ev: dict) -> str:
+    """Best join URL on an event: Meet link, then a video conference entry point."""
+    assert isinstance(ev, dict), "event dict required"
+    if ev.get("hangoutLink"):
+        return ev["hangoutLink"]
+    points = ((ev.get("conferenceData") or {}).get("entryPoints") or [])[:10]
+    for p in points:
+        if p.get("entryPointType") == "video" and p.get("uri"):
+            return p["uri"]
+    loc = ev.get("location") or ""
+    return loc if loc.startswith("http") else ""
+
+
+def exec_copy_id(key: str) -> str:
+    """Deterministic Google event id for an exec copy (base32hex-safe: sha1 hex)."""
+    assert key, "key required"
+    import hashlib
+    return "fai" + hashlib.sha1(key.encode()).hexdigest()
+
+
+def copy_to_exec(src: dict, exec_name: str, key: str) -> dict:
+    """Put a client-organized meeting on the exec's own calendar (same time, title
+    and join link). Idempotent across both execs via a deterministic event id, so
+    restarts and a flipped free/busy pick never create a second copy."""
+    assert exec_name in EXECS, f"unknown exec: {exec_name}"
+    assert src.get("start") and src.get("end"), "source event needs start/end"
+    import requests
+    eid = exec_copy_id(key)
+    for other in EXECS:                                   # bounded: 2 execs
+        cal = _exec_calendar(other)
+        tok = _gcal_token(subject=cal)
+        if not tok:
+            return {"performed": False, "reason": "gcal_not_configured"}
+        r = requests.get(f"{_CAL_API}/calendars/{cal}/events/{eid}",
+                         headers={"Authorization": f"Bearer {tok}"}, timeout=15)
+        if r.ok and r.json().get("status") != "cancelled":
+            return {"performed": False, "reason": "already_present", "exec": other}
+    cal = _exec_calendar(exec_name)
+    tok = _gcal_token(subject=cal)
+    link = _join_link(src)
+    org = (src.get("organizer") or {}).get("email", "the client")
+    note = (f"Added by meetingbuddy: {org} owns this invite, so this is your copy. "
+            f"Join: {link or 'see the details below'}\n\n")
+    body = {"id": eid, "summary": src.get("summary") or "Client meeting",
+            "start": src["start"], "end": src["end"],
+            "location": link or src.get("location") or "",
+            "description": note + (src.get("description") or "")[:6000]}
+    r = requests.post(f"{_CAL_API}/calendars/{cal}/events", params={"sendUpdates": "none"},
+                      headers={"Authorization": f"Bearer {tok}"}, json=body, timeout=15)
+    if r.status_code == 409:
+        return {"performed": False, "reason": "already_present", "exec": exec_name}
+    r.raise_for_status()
+    return {"performed": True, "reason": "copied", "exec": exec_name}
 
 
 def _gcal_ready() -> bool:
